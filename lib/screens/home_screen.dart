@@ -5,6 +5,7 @@ import 'service_directory_screen.dart';
 import 'healthcare_providers_screen.dart';
 import 'placeholder_screens.dart';
 import 'calendar_screen.dart';
+import '../services/supabase_service.dart';
 
 /// New home page: header, slideshow placeholder (Lian RHU / services), and 4 cards.
 class HomeScreen extends StatelessWidget {
@@ -255,7 +256,7 @@ class HomeScreen extends StatelessWidget {
                     Material(
                       color: Colors.transparent,
                       child: InkWell(
-                        onTap: () {},
+                        onTap: () => _openAbisoFromHome(context),
                         borderRadius: BorderRadius.circular(20),
                         child: Stack(
                           clipBehavior: Clip.none,
@@ -276,13 +277,21 @@ class HomeScreen extends StatelessWidget {
                             Positioned(
                               right: 2,
                               top: 2,
-                              child: Container(
-                                width: 8,
-                                height: 8,
-                                decoration: const BoxDecoration(
-                                  color: AppTheme.notificationBadge,
-                                  shape: BoxShape.circle,
-                                ),
+                              child: FutureBuilder<int>(
+                                future: _countUpcomingNotifications(),
+                                builder: (context, snapshot) {
+                                  final hasDot =
+                                      (snapshot.data ?? 0) > 0;
+                                  if (!hasDot) return const SizedBox.shrink();
+                                  return Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: const BoxDecoration(
+                                      color: AppTheme.notificationBadge,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  );
+                                },
                               ),
                             ),
                           ],
@@ -318,6 +327,203 @@ class HomeScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  void _openAbisoFromHome(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const CalendarScreen(initialTabIndex: 2),
+      ),
+    );
+  }
+
+  Future<int> _countUpcomingNotifications() async {
+    final uid = SupabaseService.client.auth.currentUser?.id;
+    if (uid == null) return 0;
+
+    int ageFromDob(DateTime dob) {
+      final now = DateTime.now();
+      var a = now.year - dob.year;
+      if (now.month < dob.month ||
+          (now.month == dob.month && now.day < dob.day)) {
+        a--;
+      }
+      return a;
+    }
+
+    bool personMatchesGroupKey(String groupKey, int age, String sex, bool? preg) {
+      switch (groupKey) {
+        case 'buntis':
+          return sex == 'female' && preg == true;
+        case 'bata':
+          return age >= 0 && age <= 9;
+        case 'adolescent':
+          return age >= 10 && age <= 19;
+        case 'adult':
+          return age >= 20 && age <= 59;
+        case 'elderly':
+          return age >= 60;
+        default:
+          return false;
+      }
+    }
+
+    DateTime? parseDate(dynamic v) {
+      if (v == null) return null;
+      if (v is DateTime) return v;
+      final s = v.toString();
+      if (s.isEmpty) return null;
+      return DateTime.tryParse(s.split('T').first);
+    }
+
+    int? parseNullableInt(dynamic v) {
+      if (v == null) return null;
+      if (v is int) return v;
+      return int.tryParse(v.toString());
+    }
+
+    final now = DateTime.now();
+    final startOfToday = DateTime(now.year, now.month, now.day);
+    final horizon = now.add(const Duration(days: 30));
+
+    // Profile (self).
+    int? profileAge;
+    String? profileSex;
+    final profRes = await SupabaseService.client
+        .from('profiles')
+        .select('age, sex')
+        .eq('user_id', uid)
+        .maybeSingle();
+    profileAge = profRes?['age'] as int?;
+    profileSex = profRes?['sex'] as String?;
+
+    final persons = <({int age, String sex, bool? preg})>[];
+    if (profileAge != null && profileSex != null) {
+      persons.add((age: profileAge, sex: profileSex, preg: null));
+    }
+
+    // Family members.
+    String? familyId;
+    try {
+      final fam = await SupabaseService.client
+          .from('families')
+          .select('id')
+          .eq('decision_maker_user_id', uid)
+          .maybeSingle();
+      familyId = fam?['id'] as String?;
+    } catch (_) {}
+
+    if (familyId == null) {
+      try {
+        final mem = await SupabaseService.client
+            .from('family_members')
+            .select('family_id')
+            .eq('user_id', uid)
+            .maybeSingle();
+        familyId = mem?['family_id'] as String?;
+      } catch (_) {}
+    }
+
+    if (familyId != null) {
+      final membersRes = await SupabaseService.client
+          .from('family_members')
+          .select('date_of_birth, sex, pregnancy_status')
+          .eq('family_id', familyId);
+      final members = List<Map<String, dynamic>>.from(
+        (membersRes as dynamic) as List,
+      );
+      for (final m in members) {
+        final dob = parseDate(m['date_of_birth']);
+        if (dob == null) continue;
+        final sex = (m['sex'] as String?) ?? 'other';
+        final preg = m['pregnancy_status'] as bool?;
+        persons.add((age: ageFromDob(dob), sex: sex, preg: preg));
+      }
+    }
+
+    if (persons.isEmpty) return 0;
+
+    // Upcoming admin events.
+    final calRes = await SupabaseService.client
+        .from('calendar_events')
+        .select(
+          'id, event_date, group_types, group_type, age_range_min, age_range_max, send_announcement',
+        );
+    final calList = List<Map<String, dynamic>>.from(
+      (calRes as dynamic) as List,
+    );
+
+    final matchedEventIds = <String>{};
+    for (final ev in calList) {
+      final sendAnn = ev['send_announcement'] as bool? ?? false;
+      if (!sendAnn) continue;
+
+      final evDate = parseDate(ev['event_date']);
+      if (evDate == null) continue;
+      if (evDate.isBefore(startOfToday)) continue;
+      if (evDate.isAfter(horizon)) continue;
+
+      final ageMin = parseNullableInt(ev['age_range_min']);
+      final ageMax = parseNullableInt(ev['age_range_max']);
+
+      final rawGt = ev['group_types'];
+      final List<String> groups = rawGt is List
+          ? rawGt.map((x) => x.toString()).toList()
+          : rawGt is String
+              ? rawGt
+                  .trim()
+                  .replaceAll('{', '')
+                  .replaceAll('}', '')
+                  .split(',')
+                  .map((x) => x.trim())
+                  .where((x) => x.isNotEmpty)
+                  .toList()
+              : <String>[];
+      final fallbackGroup = ev['group_type'] as String?;
+      final groupKeys = groups.isNotEmpty
+          ? groups
+          : (fallbackGroup != null ? [fallbackGroup] : <String>[]);
+      if (groupKeys.isEmpty) continue;
+
+      bool eventMatches = false;
+      for (final p in persons) {
+        if (ageMin != null && p.age < ageMin) continue;
+        if (ageMax != null && p.age > ageMax) continue;
+
+        if (groupKeys.any(
+          (g) => personMatchesGroupKey(g, p.age, p.sex, p.preg),
+        )) {
+          eventMatches = true;
+          break;
+        }
+      }
+
+      if (!eventMatches) continue;
+
+      final id = ev['id']?.toString() ?? '';
+      if (id.isNotEmpty) matchedEventIds.add(id);
+    }
+
+    // Subtract already-read admin event notifications.
+    final readRes = await SupabaseService.client
+        .from('admin_calendar_event_notification_reads')
+        .select('calendar_event_id')
+        .eq('user_id', uid);
+    final readRows =
+        List<Map<String, dynamic>>.from((readRes as dynamic) as List);
+    final readIds = <String>{};
+    for (final r in readRows) {
+      final id = r['calendar_event_id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      readIds.add(id);
+    }
+
+    int unreadCount = 0;
+    for (final id in matchedEventIds) {
+      if (!readIds.contains(id)) unreadCount++;
+    }
+
+    return unreadCount;
   }
 
   /// Placeholder for slideshow (Lian RHU, services). Size proportionate to reference.

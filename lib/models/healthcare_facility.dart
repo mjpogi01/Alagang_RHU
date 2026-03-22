@@ -53,6 +53,26 @@ class HealthcareFacility {
 
   bool get isHospital => type == HealthcareFacilityType.hospital;
 
+  /// Builds a [HealthcareFacility] from a Supabase health_facilities row (must have latitude, longitude).
+  static HealthcareFacility? fromSupabaseRow(Map<String, dynamic> row) {
+    final lat = row['latitude'] as num?;
+    final lng = row['longitude'] as num?;
+    if (lat == null || lng == null) return null;
+    final typeStr = (row['type'] as String? ?? '').toLowerCase();
+    final type = typeStr.contains('hospital') || typeStr.contains('specialty')
+        ? HealthcareFacilityType.hospital
+        : HealthcareFacilityType.clinic;
+    final servicesList = (row['services'] as List<dynamic>?)?.map((e) => e.toString()).toList();
+    return HealthcareFacility(
+      name: row['name'] as String? ?? '—',
+      position: LatLng(lat.toDouble(), lng.toDouble()),
+      type: type,
+      address: row['address'] as String?,
+      contactPhone: row['phone'] as String?,
+      services: servicesList?.isNotEmpty == true ? servicesList : null,
+    );
+  }
+
   /// Category string for display: level + sector (e.g. "L2 · Government").
   String get categoryLabel {
     final parts = <String>[];

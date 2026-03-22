@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'family_members_screen.dart';
+import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
+import 'service_schedules_flow.dart';
 
 /// Status/age groups for health events; each has a color code on the calendar.
 enum HealthEventGroup {
@@ -22,90 +24,26 @@ class CalendarHealthEvent {
     required this.group,
     required this.title,
     this.description,
+    this.time,
+    this.facility,
+    /// Custom age range from admin (e.g. "Edad: 5–12 taong gulang"); shown once per sched.
+    this.ageRangeNote,
+    /// Supabase row id for admin events; used to dedupe upcoming list.
+    this.calendarEventId,
+    /// Short merged audience line for upcoming (e.g. "Buntis · Bata").
+    this.audienceSummary,
   });
 
   final HealthEventGroup group;
   final String title;
   final String? description;
-}
-
-/// Mock health events by date (replace with API/DB). Key: 'yyyy-MM-dd'.
-Map<String, List<CalendarHealthEvent>> get _mockHealthEventsWithDetails {
-  final now = DateTime.now();
-  final year = now.year;
-  final month = now.month;
-  final m = month.toString().padLeft(2, '0');
-  return {
-    '$year-$m-05': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.buntis,
-        title: 'Pagsusuring prenatal (Buntis)',
-        description: 'Lian RHU · 8:00 AM – 12:00 PM',
-      ),
-      CalendarHealthEvent(
-        group: HealthEventGroup.bata,
-        title: 'Pagbabakuna ng bata',
-        description: 'Buwanang araw ng pagbabakuna sa RHU',
-      ),
-    ],
-    '$year-$m-10': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.adolescent,
-        title: 'Klinika para sa kabataan',
-        description: 'Lian RHU · Ayon sa takdang oras',
-      ),
-    ],
-    '$year-$m-15': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.buntis,
-        title: 'Pagsusuring prenatal (Buntis)',
-        description: 'Lian RHU · 8:00 AM – 12:00 PM',
-      ),
-    ],
-    '$year-$m-20': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.bata,
-        title: 'Regular na konsultasyon ng bata',
-        description: 'Istasyon ng Kalusugan ng Barangay',
-      ),
-      CalendarHealthEvent(
-        group: HealthEventGroup.adult,
-        title: 'Mga serbisyo sa pagpaplano ng pamilya',
-        description: 'Lian RHU · Lunes hanggang Biyernes',
-      ),
-    ],
-    '$year-$m-22': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.elderly,
-        title: 'Pagsusuri ng presyon ng dugo at kalusugan ng nakatatanda',
-        description: 'Lian RHU · 9:00 AM',
-      ),
-    ],
-    '$year-$m-25': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.adult,
-        title: 'Pagsubaybay sa TB-DOTS',
-        description: 'Istasyon ng Kalusugan ng Barangay',
-      ),
-      CalendarHealthEvent(
-        group: HealthEventGroup.elderly,
-        title: 'Klinika para sa nakatatanda',
-        description: 'Lian RHU · 10:00 AM',
-      ),
-    ],
-    '$year-$m-28': [
-      CalendarHealthEvent(
-        group: HealthEventGroup.buntis,
-        title: 'Pagsusuring prenatal (Buntis)',
-        description: 'Lian RHU · 8:00 AM – 12:00 PM',
-      ),
-      CalendarHealthEvent(
-        group: HealthEventGroup.adolescent,
-        title: 'Pagbabakuna ng kabataan',
-        description: 'Lian RHU · Ayon sa takdang oras',
-      ),
-    ],
-  };
+  /// Optional time string (e.g. "9:00 AM") from calendar_events.start_time.
+  final String? time;
+  /// Optional facility/location from calendar_events.facility.
+  final String? facility;
+  final String? ageRangeNote;
+  final String? calendarEventId;
+  final String? audienceSummary;
 }
 
 const List<String> _tagalogMonthNames = [
@@ -207,21 +145,19 @@ extension _CalendarAudienceFilterX on _CalendarAudienceFilter {
   }
 }
 
-enum _NoticeFilter { lahat, paalala, rhu, seasonal, nalagpasan }
+enum _NoticeFilter { lahat, appointments, announcement }
+
+enum _NoticeSource { appointmentReminder, adminEvent }
 
 extension _NoticeFilterX on _NoticeFilter {
   String get label {
     switch (this) {
       case _NoticeFilter.lahat:
         return 'Lahat';
-      case _NoticeFilter.paalala:
-        return 'Paalala';
-      case _NoticeFilter.rhu:
-        return 'Abiso ng RHU';
-      case _NoticeFilter.seasonal:
-        return 'Pang-panahon';
-      case _NoticeFilter.nalagpasan:
-        return 'Nalagpasan';
+      case _NoticeFilter.appointments:
+        return 'Appointments';
+      case _NoticeFilter.announcement:
+        return 'Announcement';
     }
   }
 
@@ -229,14 +165,10 @@ extension _NoticeFilterX on _NoticeFilter {
     switch (this) {
       case _NoticeFilter.lahat:
         return AppTheme.primaryBlue;
-      case _NoticeFilter.paalala:
-        return const Color(0xFF7EB8DA);
-      case _NoticeFilter.rhu:
+      case _NoticeFilter.appointments:
+        return AppTheme.adolescentBlue;
+      case _NoticeFilter.announcement:
         return AppTheme.accentTeal;
-      case _NoticeFilter.seasonal:
-        return AppTheme.adultOrange;
-      case _NoticeFilter.nalagpasan:
-        return AppTheme.accentEmergency;
     }
   }
 }
@@ -263,40 +195,18 @@ class _UpcomingScheduleItem {
   final String actionLabel;
 }
 
-class _MemberCarePlanItem {
-  const _MemberCarePlanItem({
-    required this.title,
-    required this.dateTime,
-    required this.statusLabel,
-    required this.statusColor,
-  });
-
-  final String title;
-  final DateTime dateTime;
-  final String statusLabel;
-  final Color statusColor;
-}
-
 class _FamilyMemberOverview {
   const _FamilyMemberOverview({
     required this.name,
     required this.profileLabel,
     required this.detailLine,
     required this.group,
-    required this.summaryBadge,
-    required this.summaryBadgeColor,
-    required this.highlights,
-    required this.careItems,
   });
 
   final String name;
   final String profileLabel;
   final String detailLine;
   final HealthEventGroup group;
-  final String summaryBadge;
-  final Color summaryBadgeColor;
-  final List<String> highlights;
-  final List<_MemberCarePlanItem> careItems;
 }
 
 class _AlertNoticeItem {
@@ -308,6 +218,12 @@ class _AlertNoticeItem {
     required this.icon,
     required this.accentColor,
     required this.actionLabel,
+    required this.calendarEventId,
+    required this.source,
+    required this.appointmentId,
+    required this.reminderType,
+    required this.isRead,
+    required this.scheduledAt,
   });
 
   final _NoticeFilter filter;
@@ -317,6 +233,12 @@ class _AlertNoticeItem {
   final IconData icon;
   final Color accentColor;
   final String actionLabel;
+  final String? calendarEventId;
+  final _NoticeSource source;
+  final String? appointmentId;
+  final String reminderType;
+  final bool isRead;
+  final DateTime scheduledAt;
 }
 
 /// Pixel-faithful recreation of traditional Philippine wall calendar:
@@ -328,11 +250,17 @@ class CalendarScreen extends StatefulWidget {
     this.showAppBar = true,
     this.scrollController,
     this.backgroundColor,
+    this.initialTabIndex,
+    this.openAddFamilyMemberModalOnStart = false,
   });
 
   final bool showAppBar;
   final ScrollController? scrollController;
   final Color? backgroundColor;
+  /// 0=Kalendaryo, 1=Mga Miyembro, 2=Mga Abiso.
+  final int? initialTabIndex;
+  /// If true, switches to Members tab and opens the add-member modal.
+  final bool openAddFamilyMemberModalOnStart;
 
   @override
   State<CalendarScreen> createState() => _CalendarScreenState();
@@ -348,10 +276,962 @@ class _CalendarScreenState extends State<CalendarScreen> {
   _NoticeFilter _selectedNoticeFilter = _NoticeFilter.lahat;
   CalendarFormat _calendarFormat = CalendarFormat.month;
 
+  Map<String, List<CalendarHealthEvent>> _eventsByDate = {};
+  List<_AlertNoticeItem> _upcomingNotifications = [];
+  bool _loading = true;
+  String? _error;
+  bool _abisoMarkedRead = false;
+
+  bool _membersLoading = false;
+  String? _membersError;
+  List<Map<String, dynamic>> _familyMembersRows = [];
+
+  Future<String?> _ensureFamilyIdForUser(String uid) async {
+    final client = SupabaseService.client;
+    String? familyId;
+
+    try {
+      final mem = await client
+          .from('family_members')
+          .select('family_id')
+          .eq('user_id', uid)
+          .maybeSingle();
+      if (mem != null && mem['family_id'] != null) {
+        familyId = mem['family_id'] as String;
+      }
+    } catch (_) {}
+
+    if (familyId == null) {
+      try {
+        final fam = await client
+            .from('families')
+            .select('id')
+            .eq('decision_maker_user_id', uid)
+            .maybeSingle();
+        familyId = fam?['id'] as String?;
+      } catch (_) {}
+    }
+
+    if (familyId == null) {
+      try {
+        final createdId =
+            await client.rpc('create_my_family', params: {'family_name': null});
+        if (createdId is String) {
+          familyId = createdId;
+        } else if (createdId != null) {
+          familyId = createdId.toString();
+        }
+      } catch (_) {}
+    }
+
+    return familyId;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialTabIndex != null) {
+      final idx = widget.initialTabIndex!;
+      if (idx == 1) _selectedTab = _FamilyCalendarTab.miyembro;
+      if (idx == 2) _selectedTab = _FamilyCalendarTab.abiso;
+    }
+    _loadCalendarData();
+    _loadFamilyMembers();
+    if (widget.openAddFamilyMemberModalOnStart) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        setState(() => _selectedTab = _FamilyCalendarTab.miyembro);
+        await _showAddFamilyMemberDialog();
+      });
+    }
+  }
+
+  Future<void> _loadFamilyMembers() async {
+    final client = SupabaseService.client;
+    final uid = client.auth.currentUser?.id;
+    if (uid == null) return;
+    setState(() {
+      _membersLoading = true;
+      _membersError = null;
+    });
+    try {
+      final familyId = await _ensureFamilyIdForUser(uid);
+      if (familyId == null) {
+        if (!mounted) return;
+        setState(() {
+          _membersLoading = false;
+          _membersError = 'Hindi makuha ang pamilya.';
+        });
+        return;
+      }
+      final res = await client
+          .from('family_members')
+          .select(
+              'id, user_id, name, date_of_birth, sex, pregnancy_status, comorbidities')
+          .eq('family_id', familyId)
+          .order('date_of_birth', ascending: true);
+      final rows = List<Map<String, dynamic>>.from(res as List);
+      if (!mounted) return;
+      setState(() {
+        _familyMembersRows = rows;
+        _membersLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _membersLoading = false;
+        _membersError = e.toString();
+      });
+    }
+  }
+
+  Future<void> _showAddFamilyMemberDialog() async {
+    final client = SupabaseService.client;
+    final uid = client.auth.currentUser?.id;
+    if (uid == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Mag-sign in muna para makapagdagdag ng miyembro.')),
+      );
+      return;
+    }
+
+    final nameCtrl = TextEditingController();
+    DateTime dob = DateTime.now().subtract(const Duration(days: 365 * 20));
+    String sex = 'female';
+    bool? pregnant = null;
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          return AlertDialog(
+            title: const Text('Magdagdag ng miyembro'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Pangalan (optional)'),
+                    textCapitalization: TextCapitalization.words,
+                  ),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Petsa ng kapanganakan'),
+                    subtitle: Text(_formatTagalogDate(dob)),
+                    trailing: TextButton(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: ctx,
+                          initialDate: dob,
+                          firstDate: DateTime(1900),
+                          lastDate: DateTime.now(),
+                        );
+                        if (picked != null) setD(() => dob = picked);
+                      },
+                      child: const Text('Piliin'),
+                    ),
+                  ),
+                  DropdownButtonFormField<String>(
+                    value: sex,
+                    decoration: const InputDecoration(labelText: 'Kasarian'),
+                    items: const [
+                      DropdownMenuItem(value: 'female', child: Text('Babae')),
+                      DropdownMenuItem(value: 'male', child: Text('Lalaki')),
+                      DropdownMenuItem(value: 'other', child: Text('Iba pa')),
+                    ],
+                    onChanged: (v) {
+                      setD(() {
+                        sex = v ?? 'female';
+                        if (sex != 'female') pregnant = null;
+                      });
+                    },
+                  ),
+                  if (sex == 'female') ...[
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Buntis'),
+                      value: pregnant == true,
+                      onChanged: (v) => setD(() => pregnant = v ? true : false),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+              FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Save')),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (ok != true) {
+      nameCtrl.dispose();
+      return;
+    }
+
+    try {
+      final familyId = await _ensureFamilyIdForUser(uid);
+      if (familyId == null) throw Exception('No family id');
+      await client.from('family_members').insert({
+        'family_id': familyId,
+        'name': nameCtrl.text.trim().isEmpty ? null : nameCtrl.text.trim(),
+        'date_of_birth': dob.toIso8601String(),
+        'sex': sex,
+        'pregnancy_status': sex == 'female' ? pregnant : null,
+        'comorbidities': <String>[],
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Naidagdag ang miyembro ng pamilya.')),
+      );
+      await _loadFamilyMembers();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hindi na-save ang miyembro: $e')),
+      );
+    } finally {
+      nameCtrl.dispose();
+    }
+  }
+
+  Future<void> _showEditFamilyMemberDialog(Map<String, dynamic> existing) async {
+    final client = SupabaseService.client;
+    final uid = client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    final memberId = existing['id']?.toString();
+    if (memberId == null || memberId.isEmpty) return;
+
+    final nameCtrl = TextEditingController(text: (existing['name'] as String?)?.trim() ?? '');
+    DateTime dob = DateTime.now().subtract(const Duration(days: 365 * 20));
+    final dobRaw = existing['date_of_birth']?.toString().split('T').first;
+    if (dobRaw != null) {
+      final parsed = DateTime.tryParse(dobRaw);
+      if (parsed != null) dob = parsed;
+    }
+    String sex = (existing['sex'] as String?) ?? 'female';
+    bool? pregnant = existing['pregnancy_status'] as bool?;
+    if (sex != 'female') pregnant = null;
+
+    bool deleteRequested = false;
+
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) {
+          return AlertDialog(
+            title: const Text('I-edit ang miyembro'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Pangalan (optional)'),
+                    textCapitalization: TextCapitalization.words,
+                  ),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Petsa ng kapanganakan'),
+                    subtitle: Text(_formatTagalogDate(dob)),
+                    trailing: TextButton(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: ctx,
+                          initialDate: dob,
+                          firstDate: DateTime(1900),
+                          lastDate: DateTime.now(),
+                        );
+                        if (picked != null) setD(() => dob = picked);
+                      },
+                      child: const Text('Piliin'),
+                    ),
+                  ),
+                  DropdownButtonFormField<String>(
+                    value: sex,
+                    decoration: const InputDecoration(labelText: 'Kasarian'),
+                    items: const [
+                      DropdownMenuItem(value: 'female', child: Text('Babae')),
+                      DropdownMenuItem(value: 'male', child: Text('Lalaki')),
+                      DropdownMenuItem(value: 'other', child: Text('Iba pa')),
+                    ],
+                    onChanged: (v) {
+                      setD(() {
+                        sex = v ?? 'female';
+                        if (sex != 'female') pregnant = null;
+                      });
+                    },
+                  ),
+                  if (sex == 'female') ...[
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Buntis'),
+                      value: pregnant == true,
+                      onChanged: (v) => setD(() => pregnant = v ? true : false),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () {
+                  deleteRequested = true;
+                  Navigator.of(ctx).pop(true);
+                },
+                style: TextButton.styleFrom(foregroundColor: AppTheme.accentEmergency),
+                child: const Text('Delete'),
+              ),
+              FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Save')),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (ok != true) {
+      nameCtrl.dispose();
+      return;
+    }
+
+    try {
+      if (deleteRequested) {
+        await client.from('family_members').delete().eq('id', memberId);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Na-delete ang miyembro ng pamilya.')),
+        );
+        await _loadFamilyMembers();
+        return;
+      }
+
+      await client.from('family_members').update({
+        'name': nameCtrl.text.trim().isEmpty ? null : nameCtrl.text.trim(),
+        'date_of_birth': dob.toIso8601String(),
+        'sex': sex,
+        'pregnancy_status': sex == 'female' ? pregnant : null,
+      }).eq('id', memberId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Na-update ang miyembro ng pamilya.')),
+      );
+      await _loadFamilyMembers();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hindi na-save ang miyembro: $e')),
+      );
+    } finally {
+      nameCtrl.dispose();
+    }
+  }
+
+  /// Loads user appointments and system calendar_events (admin-created schedules).
+  Future<void> _loadCalendarData() async {
+    if (!mounted) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    final Map<String, List<CalendarHealthEvent>> byDate = {};
+    final List<_AlertNoticeItem> upcomingNotifications = [];
+    try {
+      final client = SupabaseService.client;
+      final userId = client.auth.currentUser?.id;
+
+      DateTime? dateFromKey(String dateKey) {
+        final parts = dateKey.split('-');
+        if (parts.length != 3) return null;
+        final y = int.tryParse(parts[0]);
+        final m = int.tryParse(parts[1]);
+        final d = int.tryParse(parts[2]);
+        if (y == null || m == null || d == null) return null;
+        return DateTime(y, m, d);
+      }
+
+      DateTime timeOnDay(DateTime day, String dbTime) {
+        final parts = dbTime.split(':');
+        final h = int.tryParse(parts[0]) ?? 0;
+        final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+        return DateTime(day.year, day.month, day.day, h, m);
+      }
+
+      // Used to compute age-group markers for booked appointments.
+      Map<String, ({DateTime dob, String sex, bool? preg, String name})>
+          familyMemberMetaById = {};
+      int? profileAge;
+      String? profileSex;
+      String? profileFullName;
+
+      if (userId != null) {
+        // Batch-load family_members for age-group mapping.
+        final familyId = await _ensureFamilyIdForUser(userId);
+        if (familyId != null) {
+          final fmRes = await client
+              .from('family_members')
+              .select('id, name, date_of_birth, sex, pregnancy_status')
+              .eq('family_id', familyId);
+          final fmList =
+              List<Map<String, dynamic>>.from((fmRes as dynamic) as List);
+          for (final r in fmList) {
+            final id = r['id']?.toString() ?? '';
+            if (id.isEmpty) continue;
+            final dobRaw = r['date_of_birth']?.toString().split('T').first;
+            final dob = dobRaw != null ? DateTime.tryParse(dobRaw) : null;
+            if (dob == null) continue;
+            final sex = (r['sex'] as String?) ?? 'other';
+            final preg = r['pregnancy_status'] as bool?;
+            final name = (r['name'] as String?) ?? 'Miyembro ng pamilya';
+            familyMemberMetaById[id] = (dob: dob, sex: sex, preg: preg, name: name);
+          }
+        }
+
+        // For appointments booked for "self" (family_member_id == null),
+        // fall back to profiles age/sex/name.
+        try {
+          final profRes = await client
+              .from('profiles')
+              .select('age, sex, full_name')
+              .eq('user_id', userId)
+              .maybeSingle();
+          profileAge = profRes?['age'] as int?;
+          profileSex = profRes?['sex'] as String?;
+          profileFullName = profRes?['full_name'] as String?;
+        } catch (_) {}
+
+        final appointmentsRes = await client
+            .from('appointments')
+            .select('id, event_date, title, description, status, family_member_id')
+            .eq('user_id', userId)
+            .order('event_date', ascending: true);
+        final appointmentsList =
+            List<Map<String, dynamic>>.from(appointmentsRes as List);
+
+        final apptTemps = <({
+          String dateKey,
+          String title,
+          String? description,
+          String appointmentId,
+          HealthEventGroup group,
+          String? calendarEventId,
+          String? familyMemberId,
+          String memberLabel,
+        })>[];
+        final calEventIds = <String>{};
+
+        for (final row in appointmentsList) {
+          final status = row['status'] as String?;
+          if (status == 'cancelled') continue;
+
+          final dateKey = row['event_date'] is String
+              ? row['event_date'] as String
+              : _dateKeyFromDateTime(row['event_date']);
+          if (dateKey.isEmpty) continue;
+
+          final appointmentId = row['id']?.toString() ?? '';
+          if (appointmentId.isEmpty) continue;
+
+          final memberId = row['family_member_id']?.toString();
+          final rawDesc = row['description'] as String?;
+          final calendarEventId =
+              _rhuCalIdFromAppointmentDescription(rawDesc);
+          if (calendarEventId != null && calendarEventId.isNotEmpty) {
+            calEventIds.add(calendarEventId);
+          }
+
+          final group = _appointmentGroupForRow(
+            memberId: memberId,
+            familyMemberMetaById: familyMemberMetaById,
+            profileAge: profileAge,
+            profileSex: profileSex,
+          );
+
+          final memberLabel = memberId != null && memberId.isNotEmpty
+              ? (familyMemberMetaById[memberId]?.name ??
+                  'Miyembro ng pamilya')
+              : (profileFullName ?? 'Ikaw');
+
+          apptTemps.add((
+            dateKey: dateKey,
+            title: row['title'] as String? ?? 'Serbisyo',
+            description: _cleanAppointmentDescriptionForUi(rawDesc),
+            appointmentId: appointmentId,
+            group: group,
+            calendarEventId: calendarEventId,
+            familyMemberId: memberId,
+            memberLabel: memberLabel,
+          ));
+        }
+
+        // Load schedule metadata from the referenced calendar_events.
+        final calMetaById = <String, Map<String, dynamic>>{};
+        if (calEventIds.isNotEmpty) {
+          // Avoid PostgREST `.in(...)` filter compatibility issues across
+          // supabase_flutter versions; just fetch and filter by ids locally.
+          final calRes = await client
+              .from('calendar_events')
+              .select(
+                'id, start_time, facility',
+              );
+          final calList =
+              List<Map<String, dynamic>>.from((calRes as dynamic) as List);
+          for (final r in calList) {
+            final id = r['id']?.toString() ?? '';
+            if (id.isEmpty) continue;
+            if (!calEventIds.contains(id)) continue;
+            calMetaById[id] = r;
+          }
+        }
+
+        final now = DateTime.now();
+        final horizon = now.add(const Duration(days: 7));
+
+        // Build calendar events map + upcoming notification list.
+        for (final appt in apptTemps) {
+          final cal =
+              appt.calendarEventId == null ? null : calMetaById[appt.calendarEventId];
+          final startTimeRaw = cal?['start_time']?.toString();
+          final facility = cal?['facility'] as String?;
+
+          final timeStr = (startTimeRaw != null && startTimeRaw.isNotEmpty)
+              ? _formatEventTimeFromDb(startTimeRaw)
+              : null;
+
+          byDate.putIfAbsent(appt.dateKey, () => []).add(CalendarHealthEvent(
+                group: appt.group,
+                title: appt.title,
+                description: appt.description,
+                time: timeStr,
+                facility: facility,
+                calendarEventId: appt.calendarEventId,
+              ));
+
+          if (appt.calendarEventId == null) continue;
+          final day = dateFromKey(appt.dateKey);
+          if (day == null || startTimeRaw == null || startTimeRaw.isEmpty) {
+            continue;
+          }
+
+          final scheduleStart = timeOnDay(day, startTimeRaw);
+
+          final baseTitle = 'Paalala: Appointment';
+          final timeLabel = _formatEventTimeFromDb(startTimeRaw);
+          final dateLabel = _formatTagalogDate(day);
+          final facilityLabel =
+              (facility != null && facility.trim().isNotEmpty) ? facility.trim() : null;
+          final whereLine =
+              facilityLabel == null ? '' : ' sa $facilityLabel';
+          final desc = '${appt.memberLabel} ay may appointment: ${appt.title}$whereLine sa $dateLabel, $timeLabel.';
+
+          void addLeadNotification({
+            required _NoticeFilter filter,
+            required String reminderType,
+            required Duration lead,
+            required String timeLabel,
+            required IconData icon,
+          }) {
+            final sendAt = scheduleStart.subtract(lead);
+            if (sendAt.isBefore(now)) return;
+            if (sendAt.isAfter(horizon)) return;
+
+            upcomingNotifications.add(_AlertNoticeItem(
+              filter: filter,
+              title: baseTitle,
+              description: desc,
+              timeLabel: timeLabel,
+              icon: icon,
+              accentColor: appt.group.color,
+              actionLabel: 'Tingnan',
+              calendarEventId: appt.calendarEventId,
+              source: _NoticeSource.appointmentReminder,
+              appointmentId: appt.appointmentId,
+              reminderType: reminderType,
+              isRead: false,
+              scheduledAt: sendAt,
+            ));
+          }
+
+          addLeadNotification(
+            filter: _NoticeFilter.appointments,
+            reminderType: 'lead_7d',
+            lead: const Duration(days: 7),
+            timeLabel: '1 linggo bago',
+            icon: Icons.calendar_view_week_outlined,
+          );
+          addLeadNotification(
+            filter: _NoticeFilter.appointments,
+            reminderType: 'lead_1d',
+            lead: const Duration(days: 1),
+            timeLabel: '1 araw bago',
+            icon: Icons.calendar_month_outlined,
+          );
+          addLeadNotification(
+            filter: _NoticeFilter.appointments,
+            reminderType: 'lead_1h',
+            lead: const Duration(hours: 1),
+            timeLabel: '1 oras bago',
+            icon: Icons.access_time_outlined,
+          );
+        }
+      }
+
+        // ===== Admin-created event reminders (send_notifications = true) =====
+        // Abiso page should also show reminders for newly posted schedules
+        // even if the user hasn't booked the appointment yet.
+        final appointmentReminderKeys = <String>{};
+        for (final n in upcomingNotifications) {
+          if (n.source != _NoticeSource.appointmentReminder) continue;
+          if (n.calendarEventId == null) continue;
+          appointmentReminderKeys.add('${n.calendarEventId}|${n.reminderType}');
+        }
+
+        final candidates = <({int age, String sex, bool? preg, String label})>[];
+        if (profileAge != null && profileSex != null) {
+          candidates.add((
+            age: profileAge,
+            sex: profileSex,
+            preg: null,
+            label: profileFullName ?? 'Ikaw',
+          ));
+        }
+        for (final meta in familyMemberMetaById.values) {
+          candidates.add((
+            age: _ageFromDob(meta.dob),
+            sex: meta.sex,
+            preg: meta.preg,
+            label: meta.name,
+          ));
+        }
+
+        int? parseNullableInt(dynamic v) {
+          if (v == null) return null;
+          if (v is int) return v;
+          return int.tryParse(v.toString());
+        }
+
+        bool candidateMatchesGroupKey(
+          String groupKey,
+          int age,
+          String sex,
+          bool? preg,
+        ) {
+          switch (groupKey) {
+            case 'buntis':
+              return sex == 'female' && preg == true;
+            case 'bata':
+              return age >= 0 && age <= 9;
+            case 'adolescent':
+              return age >= 10 && age <= 19;
+            case 'adult':
+              return age >= 20 && age <= 59;
+            case 'elderly':
+              return age >= 60;
+            default:
+              return false;
+          }
+        }
+
+        List<String> groupsFromCalendarEventRow(Map<String, dynamic> ev) {
+          final rawGt = ev['group_types'];
+          if (rawGt is List) {
+            return rawGt.map((x) => x.toString()).toList();
+          }
+          if (rawGt is String) {
+            return rawGt
+                .trim()
+                .replaceAll('{', '')
+                .replaceAll('}', '')
+                .split(',')
+                .map((x) => x.trim())
+                .where((x) => x.isNotEmpty)
+                .toList();
+          }
+          final one = ev['group_type'] as String?;
+          if (one != null && one.trim().isNotEmpty) return [one.trim()];
+          return const [];
+        }
+
+        Color accentColorFromGroupKey(String g) {
+          switch (g) {
+            case 'buntis':
+              return HealthEventGroup.buntis.color;
+            case 'bata':
+              return HealthEventGroup.bata.color;
+            case 'adolescent':
+              return HealthEventGroup.adolescent.color;
+            case 'adult':
+              return HealthEventGroup.adult.color;
+            case 'elderly':
+              return HealthEventGroup.elderly.color;
+            default:
+              return AppTheme.accentTeal;
+          }
+        }
+
+        if (candidates.isNotEmpty) {
+          final adminNow = DateTime.now();
+          final startDate = DateTime(adminNow.year, adminNow.month, adminNow.day);
+          final endDate = startDate.add(const Duration(days: 30));
+          final startKey = _dateKeyFromDateTime(startDate);
+          final endKey = _dateKeyFromDateTime(endDate);
+
+          final adminRes = await client
+              .from('calendar_events')
+              .select(
+                'id, event_date, title, start_time, facility, send_announcement, announcement_title, announcement_body, group_types, group_type, age_range_min, age_range_max',
+              )
+              .eq('send_announcement', true)
+              .gte('event_date', startKey)
+              .lte('event_date', endKey);
+
+          final adminList =
+              List<Map<String, dynamic>>.from((adminRes as dynamic) as List);
+
+          for (final ev in adminList) {
+            final eventId = ev['id']?.toString() ?? '';
+            if (eventId.isEmpty) continue;
+
+            final eventDateRaw = ev['event_date'];
+            final eventDateKey =
+                eventDateRaw is String ? eventDateRaw : _dateKeyFromDateTime(eventDateRaw);
+            final day = dateFromKey(eventDateKey);
+            if (day == null) continue;
+            if (day.isBefore(startDate)) continue;
+
+            final startTimeRaw = ev['start_time']?.toString();
+            if (startTimeRaw == null || startTimeRaw.isEmpty) continue;
+
+            // For announcements we don't need lead-time scheduleStart logic.
+
+            final ageMin = parseNullableInt(ev['age_range_min']);
+            final ageMax = parseNullableInt(ev['age_range_max']);
+
+            final groupKeys = groupsFromCalendarEventRow(ev);
+            if (groupKeys.isEmpty) continue;
+
+            final eligibleLabels = <String>{};
+            for (final c in candidates) {
+              if (ageMin != null && c.age < ageMin) continue;
+              if (ageMax != null && c.age > ageMax) continue;
+
+              if (groupKeys.any((g) =>
+                  candidateMatchesGroupKey(g, c.age, c.sex, c.preg))) {
+                eligibleLabels.add(c.label);
+              }
+            }
+            if (eligibleLabels.isEmpty) continue;
+
+            final annTitle = (ev['announcement_title'] as String?)?.trim();
+            final annBody = (ev['announcement_body'] as String?)?.trim();
+            final baseTitle = (annTitle != null && annTitle.isNotEmpty)
+                ? annTitle
+                : (ev['title'] as String?)?.trim() ?? 'Bagong iskedyul';
+
+            final facilityLabel = (ev['facility'] as String?)?.trim();
+            final whereLine = (facilityLabel != null && facilityLabel.isNotEmpty)
+                ? ' sa $facilityLabel'
+                : '';
+            final dateLabel = _formatTagalogDate(day);
+            final timeLabel = _formatEventTimeFromDb(startTimeRaw);
+
+            final scheduleLine = 'Iskedyul: $dateLabel, $timeLabel$whereLine';
+            final audienceLine = 'Para sa: ${eligibleLabels.join(', ')}';
+            final description = (annBody != null && annBody.isNotEmpty)
+                ? '$annBody\n\n$scheduleLine\n$audienceLine'
+                : '$scheduleLine\n$audienceLine';
+
+            final accentColor =
+                accentColorFromGroupKey(groupKeys.first);
+
+            // Add one "announcement" notice per event (not a lead-time reminder).
+            upcomingNotifications.add(_AlertNoticeItem(
+              filter: _NoticeFilter.announcement,
+              title: baseTitle,
+              description: description,
+              timeLabel: 'Announcement',
+              icon: Icons.campaign_outlined,
+              accentColor: accentColor,
+              actionLabel: 'Tingnan',
+              calendarEventId: eventId,
+              source: _NoticeSource.adminEvent,
+              appointmentId: null,
+              reminderType: 'announcement',
+              isRead: false,
+              // Use "now" so it surfaces as a newly posted item.
+              scheduledAt: adminNow,
+            ));
+          }
+        }
+
+      upcomingNotifications.sort(
+        (a, b) => a.scheduledAt.compareTo(b.scheduledAt),
+      );
+
+      // Apply read/unread state (appointment reminders + admin event reminders).
+      if (userId != null && upcomingNotifications.isNotEmpty) {
+        final apReadRes = await client
+            .from('appointment_reminder_notification_reads')
+            .select('appointment_id, reminder_type')
+            .eq('user_id', userId);
+        final apReadRows =
+            List<Map<String, dynamic>>.from((apReadRes as dynamic) as List);
+        final apReadKeys = <String>{};
+        for (final r in apReadRows) {
+          final aid = r['appointment_id']?.toString() ?? '';
+          final rt = r['reminder_type']?.toString() ?? '';
+          if (aid.isEmpty || rt.isEmpty) continue;
+          apReadKeys.add('$aid|$rt');
+        }
+
+        final adminReadRes = await client
+            .from('admin_calendar_event_notification_reads')
+            .select('calendar_event_id')
+            .eq('user_id', userId);
+        final adminReadRows = List<Map<String, dynamic>>.from(
+            (adminReadRes as dynamic) as List);
+        final adminReadIds = <String>{};
+        for (final r in adminReadRows) {
+          final id = r['calendar_event_id']?.toString() ?? '';
+          if (id.isEmpty) continue;
+          adminReadIds.add(id);
+        }
+
+        final noticesWithRead = upcomingNotifications.map((n) {
+          final isRead = n.source == _NoticeSource.appointmentReminder
+              ? (n.appointmentId == null
+                  ? false
+                  : apReadKeys
+                      .contains('${n.appointmentId}|${n.reminderType}'))
+              : (n.calendarEventId != null &&
+                  adminReadIds.contains(n.calendarEventId));
+
+          return _AlertNoticeItem(
+            filter: n.filter,
+            source: n.source,
+            title: n.title,
+            description: n.description,
+            timeLabel: n.timeLabel,
+            icon: n.icon,
+            accentColor: n.accentColor,
+            actionLabel: n.actionLabel,
+            calendarEventId: n.calendarEventId,
+            appointmentId: n.appointmentId,
+            reminderType: n.reminderType,
+            isRead: isRead,
+            scheduledAt: n.scheduledAt,
+          );
+        }).toList();
+
+        if (!mounted) return;
+        setState(() {
+          _eventsByDate = byDate;
+          _upcomingNotifications = noticesWithRead;
+          _loading = false;
+        });
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _eventsByDate = byDate;
+        _upcomingNotifications = upcomingNotifications;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  HealthEventGroup _appointmentGroupForRow({
+    required String? memberId,
+    required Map<String, ({DateTime dob, String sex, bool? preg, String name})>
+        familyMemberMetaById,
+    required int? profileAge,
+    required String? profileSex,
+  }) {
+    if (memberId != null && memberId.isNotEmpty) {
+      final meta = familyMemberMetaById[memberId];
+      if (meta != null) {
+        // If the member is pregnant female, mark as buntis.
+        if (meta.sex == 'female' && meta.preg == true) {
+          return HealthEventGroup.buntis;
+        }
+        final age = _ageFromDob(meta.dob);
+        return _groupFromAge(age);
+      }
+    }
+
+    // Fallback to the signed-in user's profile.
+    final age = profileAge ?? 25;
+    final sex = profileSex ?? 'other';
+    if (sex == 'female') {
+      // We don't store pregnancy for self here; buntis depends on member pregnancy_status.
+      // So we fall back to age group.
+    }
+    return _groupFromAge(age);
+  }
+
+  static String _formatEventTimeFromDb(String dbTime) {
+    final parts = dbTime.split(':');
+    if (parts.isEmpty) return dbTime;
+    final h = int.tryParse(parts[0]) ?? 0;
+    final m = parts.length > 1 ? (int.tryParse(parts[1]) ?? 0) : 0;
+    final period = h >= 12 ? 'PM' : 'AM';
+    final hour12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
+    return '$hour12:${m.toString().padLeft(2, '0')} $period';
+  }
+
+  static String? _rhuCalIdFromAppointmentDescription(String? desc) {
+    if (desc == null) return null;
+    final match = RegExp(r'rhu_cal:([0-9a-fA-F\\-]{36})', multiLine: true)
+        .firstMatch(desc.trim());
+    return match?.group(1);
+  }
+
+  String? _cleanAppointmentDescriptionForUi(String? desc) {
+    if (desc == null) return null;
+    final lines = desc
+        .split('\n')
+        .map((s) => s.trim())
+        .where((line) =>
+            line.isNotEmpty &&
+            !line.startsWith('rhu_book:') &&
+            !line.startsWith('rhu_cal:'))
+        .toList();
+    if (lines.isEmpty) return null;
+    return lines.join('\n');
+  }
+
+  static String _dateKeyFromDateTime(dynamic v) {
+    if (v == null) return '';
+    if (v is String) return v.split('T').first;
+    if (v is DateTime) {
+      return '${v.year}-${v.month.toString().padLeft(2, '0')}-${v.day.toString().padLeft(2, '0')}';
+    }
+    return '';
+  }
+
   List<CalendarHealthEvent> _getEventsForDay(DateTime day) {
     final key =
         '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
-    return _mockHealthEventsWithDetails[key] ?? [];
+    return _eventsByDate[key] ?? [];
   }
 
   List<CalendarHealthEvent> _getVisibleEventsForDay(DateTime day) {
@@ -363,58 +1243,86 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   List<_UpcomingScheduleItem> get _upcomingSchedules {
     final now = DateTime.now();
-    return [
-      _UpcomingScheduleItem(
-        personName: 'Pedro Pascual',
-        relationLabel: 'Lolo',
-        title: 'Bakunang Pneumococcal',
-        dateTime: DateTime(now.year, now.month, 15, 9, 0),
-        group: HealthEventGroup.elderly,
-        statusLabel: 'Nalagpasan',
-        statusColor: AppTheme.accentEmergency,
+    final todayKey =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final List<({DateTime date, CalendarHealthEvent event})> items = [];
+    for (final entry in _eventsByDate.entries) {
+      final key = entry.key;
+      if (key.compareTo(todayKey) < 0) continue;
+      final parts = key.split('-');
+      if (parts.length != 3) continue;
+      final date = DateTime(
+        int.tryParse(parts[0]) ?? now.year,
+        int.tryParse(parts[1]) ?? now.month,
+        int.tryParse(parts[2]) ?? now.day,
+        9,
+        0,
+      );
+      final handledCal = <String>{};
+      for (final ev in entry.value) {
+        if (ev.calendarEventId != null) {
+          if (handledCal.contains(ev.calendarEventId!)) continue;
+          handledCal.add(ev.calendarEventId!);
+          final same = entry.value.where((x) => x.calendarEventId == ev.calendarEventId).toList();
+          if (same.length > 1) {
+            final parts = same
+                .map((x) => x.group.label.split('(').first.trim())
+                .toSet()
+                .toList();
+            items.add((
+              date: date,
+              event: CalendarHealthEvent(
+                group: ev.group,
+                title: ev.title,
+                description: ev.description,
+                time: ev.time,
+                facility: ev.facility,
+                ageRangeNote: ev.ageRangeNote,
+                calendarEventId: ev.calendarEventId,
+                audienceSummary: parts.join(' · '),
+              ),
+            ));
+          } else {
+            items.add((date: date, event: ev));
+          }
+        } else {
+          items.add((date: date, event: ev));
+        }
+      }
+    }
+    items.sort((a, b) => a.date.compareTo(b.date));
+    return items.take(20).map((item) {
+      final isToday = item.date.year == now.year &&
+          item.date.month == now.month &&
+          item.date.day == now.day;
+      final daysDiff = item.date.difference(DateTime(now.year, now.month, now.day)).inDays;
+      String statusLabel;
+      Color statusColor;
+      if (isToday) {
+        statusLabel = 'Ngayon';
+        statusColor = AppTheme.adultOrange;
+      } else if (daysDiff < 0) {
+        statusLabel = 'Nalagpasan';
+        statusColor = AppTheme.accentEmergency;
+      } else if (daysDiff <= 7) {
+        statusLabel = daysDiff == 1 ? 'Bukas' : 'Paparating ($daysDiff araw)';
+        statusColor = AppTheme.adolescentBlue;
+      } else {
+        statusLabel = 'Paparating';
+        statusColor = item.event.group.color;
+      }
+      return _UpcomingScheduleItem(
+        personName: item.event.title,
+        relationLabel:
+            item.event.audienceSummary ?? item.event.group.label,
+        title: item.event.title,
+        dateTime: item.date,
+        group: item.event.group,
+        statusLabel: statusLabel,
+        statusColor: statusColor,
         actionLabel: 'Tingnan',
-      ),
-      _UpcomingScheduleItem(
-        personName: 'Pedro Pascual',
-        relationLabel: 'Lolo',
-        title: 'Pagsusubaybay sa Presyon ng Dugo',
-        dateTime: DateTime(now.year, now.month, 20, 10, 0),
-        group: HealthEventGroup.elderly,
-        statusLabel: 'Ngayon',
-        statusColor: AppTheme.adultOrange,
-        actionLabel: 'Tingnan',
-      ),
-      _UpcomingScheduleItem(
-        personName: 'Sofia Pascual',
-        relationLabel: 'Anak',
-        title: 'Dagdag na bakuna laban sa tigdas',
-        dateTime: DateTime(now.year, now.month, 25, 13, 0),
-        group: HealthEventGroup.bata,
-        statusLabel: 'Paparating (7 araw)',
-        statusColor: AppTheme.adolescentBlue,
-        actionLabel: 'Tingnan',
-      ),
-      _UpcomingScheduleItem(
-        personName: 'Isabella Pascual',
-        relationLabel: 'Anak',
-        title: 'Bakunang HPV (Unang Dosis)',
-        dateTime: DateTime(now.year, now.month, 28, 11, 0),
-        group: HealthEventGroup.adolescent,
-        statusLabel: 'Paparating (7 araw)',
-        statusColor: AppTheme.adolescentBlue,
-        actionLabel: 'Tingnan',
-      ),
-      _UpcomingScheduleItem(
-        personName: 'Luis Pascual',
-        relationLabel: 'Ama',
-        title: 'Pagsusuri ng asukal sa dugo (FBS)',
-        dateTime: DateTime(now.year, now.month, 26, 8, 0),
-        group: HealthEventGroup.adult,
-        statusLabel: 'Paparating',
-        statusColor: AppTheme.elderlyPurple,
-        actionLabel: 'Tingnan',
-      ),
-    ];
+      );
+    }).toList();
   }
 
   List<_UpcomingScheduleItem> get _visibleUpcomingSchedules {
@@ -423,133 +1331,44 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return _upcomingSchedules.where((item) => item.group == group).toList();
   }
 
-  List<_FamilyMemberOverview> get _familyMemberOverviews {
+  int _ageFromDob(DateTime dob) {
     final now = DateTime.now();
-    return [
-      _FamilyMemberOverview(
-        name: 'Pedro Pascual',
-        profileLabel: 'Nakatatanda (60+) | 67 taon',
-        detailLine: 'Lalaki | Ipinanganak Nobyembre 9, 1958',
-        group: HealthEventGroup.elderly,
-        summaryBadge: '1 nalagpasan',
-        summaryBadgeColor: AppTheme.accentEmergency,
-        highlights: const ['Pulmonya', 'Paparating'],
-        careItems: [
-          _MemberCarePlanItem(
-            title: 'Bakunang Pneumococcal',
-            dateTime: DateTime(now.year, now.month, 20, 10, 0),
-            statusLabel: 'Nalagpasan',
-            statusColor: AppTheme.accentEmergency,
-          ),
-          _MemberCarePlanItem(
-            title: 'Pagsusubaybay sa Presyon ng Dugo',
-            dateTime: DateTime(now.year, now.month, 30, 8, 0),
-            statusLabel: 'Paparating',
-            statusColor: AppTheme.elderlyPurple,
-          ),
-        ],
-      ),
-      _FamilyMemberOverview(
-        name: 'Luis Pascual',
-        profileLabel: 'Nasa hustong gulang (20-59) | 35 taon',
-        detailLine: 'Lalaki | Hulyo 22, 1991',
-        group: HealthEventGroup.adult,
-        summaryBadge: '2 alerto',
-        summaryBadgeColor: AppTheme.adultOrange,
-        highlights: const ['FBS', 'BP'],
-        careItems: [
-          _MemberCarePlanItem(
-            title: 'Pagsusubaybay sa Presyon ng Dugo',
-            dateTime: DateTime(now.year, now.month, 20, 8, 0),
-            statusLabel: 'Paparating',
-            statusColor: AppTheme.elderlyPurple,
-          ),
-          _MemberCarePlanItem(
-            title: 'Pagsusuri ng asukal sa dugo (FBS)',
-            dateTime: DateTime(now.year, now.month, 26, 8, 0),
-            statusLabel: 'Paparating',
-            statusColor: AppTheme.elderlyPurple,
-          ),
-        ],
-      ),
-      _FamilyMemberOverview(
-        name: 'Baby Sofia',
-        profileLabel: 'Bata (0-9) | 2 taon',
-        detailLine: 'Babae | Pebrero 25, ${now.year - 2}',
-        group: HealthEventGroup.bata,
-        summaryBadge: '2 sa 7 araw',
-        summaryBadgeColor: AppTheme.adolescentBlue,
-        highlights: const ['Bakuna', 'Dagdag na bakuna'],
-        careItems: [
-          _MemberCarePlanItem(
-            title: 'Dagdag na bakuna laban sa tigdas',
-            dateTime: DateTime(now.year, now.month, 25, 13, 0),
-            statusLabel: 'Paparating',
-            statusColor: AppTheme.adolescentBlue,
-          ),
-        ],
-      ),
-    ];
+    int a = now.year - dob.year;
+    if (now.month < dob.month ||
+        (now.month == dob.month && now.day < dob.day)) {
+      a--;
+    }
+    return a;
   }
 
-  List<_AlertNoticeItem> get _alertNotices => [
-    const _AlertNoticeItem(
-      filter: _NoticeFilter.paalala,
-      title: 'Bakuna ni Baby Sofia',
-      description:
-          'Hindi nakumpleto ang dagdag na bakuna laban sa tigdas ni Baby Sofia. Nais mo bang magpa-iskedyul muli?',
-      timeLabel: 'Ngayon',
-      icon: Icons.vaccines_outlined,
-      accentColor: Color(0xFF3D74B6),
-      actionLabel: 'Mag-iskedyul',
-    ),
-    const _AlertNoticeItem(
-      filter: _NoticeFilter.paalala,
-      title: 'Pagsusuri ng asukal sa dugo ni Luis',
-      description:
-          'Ang iyong pagsusuri ng asukal sa dugo (FBS) ay naka-iskedyul sa Miyerkules, Agosto 20, 2026, 7:00 ng umaga.',
-      timeLabel: '2 araw bago',
-      icon: Icons.water_drop_outlined,
-      accentColor: Color(0xFF244A74),
-      actionLabel: 'Tingnan',
-    ),
-    const _AlertNoticeItem(
-      filter: _NoticeFilter.rhu,
-      title: 'Misyong Medikal sa Lian RHU',
-      description:
-          'Misyong Medikal sa Lian RHU: Abril 25, 8:00 ng umaga hanggang 12:00 ng tanghali.',
-      timeLabel: 'Kahapon',
-      icon: Icons.local_hospital_outlined,
-      accentColor: Color(0xFF2E8B57),
-      actionLabel: 'Tingnan',
-    ),
-    const _AlertNoticeItem(
-      filter: _NoticeFilter.seasonal,
-      title: 'Alerto sa Panahon ng Tag-ulan',
-      description:
-          'Ngayong panahon ng tag-ulan, inaasahang dadami ang mga kaso ng dengue. Siguraduhing malinis ang kapaligiran upang makaiwas sa impeksiyon.',
-      timeLabel: '3 araw na ang nakalipas',
-      icon: Icons.cloud_outlined,
-      accentColor: Color(0xFFF39C12),
-      actionLabel: 'Tingnan',
-    ),
-    const _AlertNoticeItem(
-      filter: _NoticeFilter.nalagpasan,
-      title: 'Lampas na ang Iskedyul: Lolo Pedro',
-      description:
-          'Ang bakunang Pneumococcal ni Lolo Pedro ay dapat na maibigay noong isang buwan ngunit hindi natuloy.',
-      timeLabel: 'Isang linggo na ang nakalipas',
-      icon: Icons.error_outline,
-      accentColor: AppTheme.accentEmergency,
-      actionLabel: 'Mag-iskedyul',
-    ),
-  ];
+  HealthEventGroup _groupFromAge(int age) {
+    if (age <= 9) return HealthEventGroup.bata;
+    if (age <= 19) return HealthEventGroup.adolescent;
+    if (age <= 59) return HealthEventGroup.adult;
+    return HealthEventGroup.elderly;
+  }
+
+  String _sexLabel(String sex) {
+    switch (sex) {
+      case 'female':
+        return 'Babae';
+      case 'male':
+        return 'Lalaki';
+      default:
+        return 'Iba pa';
+    }
+  }
+
+  String _tagalogDob(DateTime d) {
+    return '${_tagalogMonthNames[d.month - 1]} ${d.day}, ${d.year}';
+  }
+
+  List<_AlertNoticeItem> get _alertNotices => _upcomingNotifications;
 
   List<_AlertNoticeItem> get _visibleAlertNotices {
-    if (_selectedNoticeFilter == _NoticeFilter.lahat) return _alertNotices;
-    return _alertNotices
-        .where((item) => item.filter == _selectedNoticeFilter)
-        .toList();
+    final all = _alertNotices;
+    if (_selectedNoticeFilter == _NoticeFilter.lahat) return all;
+    return all.where((item) => item.filter == _selectedNoticeFilter).toList();
   }
 
   @override
@@ -756,10 +1575,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
       child: Scrollbar(
         controller: controller,
         thumbVisibility: false,
-        child: SingleChildScrollView(
-          controller: controller,
-          padding: EdgeInsets.only(bottom: bottomPadding),
-          child: Column(
+        child: RefreshIndicator(
+          onRefresh: _loadCalendarData,
+          child: SingleChildScrollView(
+            controller: controller,
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: EdgeInsets.only(bottom: bottomPadding),
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (!widget.showAppBar)
@@ -800,6 +1622,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
             ],
           ),
+        ),
         ),
       ),
     );
@@ -914,6 +1737,43 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   Widget _buildCalendarTabContent(BuildContext context) {
+    if (_loading) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Kinakarga ang kalendaryo...'),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: EdgeInsets.all(AppTheme.scale(context, AppTheme.spacingLg)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.accentEmergency),
+              ),
+              const SizedBox(height: 16),
+              FilledButton(
+                onPressed: _loadCalendarData,
+                child: const Text('Subukang muli'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     final schedules = _visibleUpcomingSchedules;
     return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -967,35 +1827,96 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
             const SizedBox(width: 12),
             FilledButton.tonalIcon(
-              onPressed: _openFamilyMembersScreen,
+              onPressed: _showAddFamilyMemberDialog,
               icon: const Icon(Icons.group_add_outlined),
               label: const Text('Pamahalaan'),
             ),
           ],
         ),
         SizedBox(height: AppTheme.scale(context, AppTheme.spacingSm)),
-        ..._familyMemberOverviews.asMap().entries.map((entry) {
-          final isLast = entry.key == _familyMemberOverviews.length - 1;
-          return Padding(
-            padding: EdgeInsets.only(
-              bottom: isLast ? 0 : AppTheme.scale(context, AppTheme.spacingSm),
+        if (_membersLoading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 28),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_membersError != null)
+          Padding(
+            padding: EdgeInsets.symmetric(
+              vertical: AppTheme.scale(context, AppTheme.spacingMd),
             ),
-            child: _buildFamilyMemberCard(context, entry.value),
-          );
-        }),
+            child: Text(
+              _membersError!,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: AppTheme.accentEmergency),
+            ),
+          )
+        else if (_familyMembersRows.isEmpty)
+          _buildEmptyState(
+            context,
+            message: 'Wala pang miyembro ng pamilya. Pindutin ang Pamahalaan para magdagdag.',
+            icon: Icons.people_outline_rounded,
+          )
+        else
+          ..._familyMembersRows.asMap().entries.map((entry) {
+            final i = entry.key;
+            final r = entry.value;
+            final isLast = i == _familyMembersRows.length - 1;
+            final name = (r['name'] as String?)?.trim();
+            final sexDb = (r['sex'] as String?) ?? 'other';
+            final preg = r['pregnancy_status'] as bool?;
+            final dobRaw = r['date_of_birth']?.toString().split('T').first;
+            final dob = dobRaw != null ? DateTime.tryParse(dobRaw) : null;
+            final age = dob != null ? _ageFromDob(dob) : 0;
+            final group = (sexDb == 'female' && preg == true)
+                ? HealthEventGroup.buntis
+                : _groupFromAge(age);
+            final profileLabel =
+                '${group.label.split('(').first.trim()} | $age taon';
+            final detailLine =
+                '${_sexLabel(sexDb)}${dob != null ? ' | ${_tagalogDob(dob)}' : ''}';
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: isLast ? 0 : AppTheme.scale(context, AppTheme.spacingSm),
+              ),
+              child: _buildFamilyMemberCard(
+                context,
+                _FamilyMemberOverview(
+                  name: name == null || name.isEmpty ? 'Miyembro ng pamilya' : name,
+                  profileLabel: profileLabel,
+                  detailLine: detailLine,
+                  group: group,
+                ),
+                onTap: () => _showEditFamilyMemberDialog(r),
+                showPlanButton: false,
+              ),
+            );
+          }),
       ],
     );
   }
 
   Widget _buildAlertsTabContent(BuildContext context) {
     final notices = _visibleAlertNotices;
+
+    if (!_abisoMarkedRead && !_loading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await _markAdminEventsAsRead();
+        await _markAppointmentRemindersAsRead(_upcomingNotifications);
+        if (!mounted) return;
+        setState(() => _abisoMarkedRead = true);
+      });
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _buildContentTitle(
           context,
           title: 'Mga Abiso',
-          subtitle: 'Mga paalala, abiso ng RHU, at mga alertong pang-panahon',
+          subtitle: 'Mga paalala at abiso para sa iskedyul',
         ),
         SizedBox(height: AppTheme.scale(context, AppTheme.spacingSm)),
         _buildNoticeFilterChips(context),
@@ -1015,11 +1936,220 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     ? 0
                     : AppTheme.scale(context, AppTheme.spacingSm),
               ),
-              child: _buildAlertCard(context, entry.value),
+              child: _buildAlertCard(
+                context,
+                entry.value,
+                onTap: () => _openNoticeSchedule(entry.value),
+              ),
             );
           }),
       ],
     );
+  }
+
+  Future<void> _openNoticeSchedule(_AlertNoticeItem item) async {
+    await _markSingleReminderAsRead(item);
+    final calendarEventId = item.calendarEventId;
+    if (calendarEventId == null || calendarEventId.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Walang detalye ng iskedyul.')),
+      );
+      return;
+    }
+
+    try {
+      final res = await SupabaseService.client
+          .from('calendar_events')
+          .select(
+            'id, event_date, title, description, start_time, end_time, facility, group_types, group_type, age_range_min, age_range_max',
+          )
+          .eq('id', calendarEventId)
+          .maybeSingle();
+
+      if (res == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Hindi ma-load ang iskedyul.')),
+        );
+        return;
+      }
+
+      if (!mounted) return;
+      await showScheduleDetailForBooking(
+        context,
+        event: Map<String, dynamic>.from(res as Map),
+      );
+      await _loadCalendarData();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hindi ma-load ang detalye: $e')),
+      );
+    }
+  }
+
+  Future<void> _markSingleReminderAsRead(_AlertNoticeItem item) async {
+    if (item.isRead) return;
+    final uid = SupabaseService.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    try {
+      if (item.source == _NoticeSource.appointmentReminder) {
+        if (item.appointmentId == null) return;
+        await SupabaseService.client
+            .from('appointment_reminder_notification_reads')
+            .insert({
+              'user_id': uid,
+              'appointment_id': item.appointmentId,
+              'reminder_type': item.reminderType,
+            });
+      } else {
+        if (item.calendarEventId == null) return;
+        await SupabaseService.client
+            .from('admin_calendar_event_notification_reads')
+            .insert({
+              'user_id': uid,
+              'calendar_event_id': item.calendarEventId,
+            });
+      }
+    } catch (_) {
+      // Ignore duplicates; reload will reflect updated state.
+    }
+  }
+
+  Future<void> _markAppointmentRemindersAsRead(
+    List<_AlertNoticeItem> notices,
+  ) async {
+    if (notices.isEmpty) return;
+    final uid = SupabaseService.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    final unread = notices
+        .where((n) =>
+            n.source == _NoticeSource.appointmentReminder &&
+            !n.isRead &&
+            n.appointmentId != null)
+        .toList();
+    if (unread.isEmpty) return;
+
+    try {
+      final rows = unread
+          .map((n) => <String, dynamic>{
+                'user_id': uid,
+                'appointment_id': n.appointmentId,
+                'reminder_type': n.reminderType,
+              })
+          .toList();
+      await SupabaseService.client
+          .from('appointment_reminder_notification_reads')
+          .insert(rows);
+    } catch (_) {
+      // Ignore insertion errors; UI will correct on next reload.
+    }
+
+    if (!mounted) return;
+    final unreadKeys =
+        unread.map((n) => '${n.appointmentId}|${n.reminderType}').toSet();
+    setState(() {
+      _upcomingNotifications = _upcomingNotifications.map((n) {
+        final key = '${n.appointmentId}|${n.reminderType}';
+        if (!unreadKeys.contains(key)) return n;
+        if (n.isRead) return n;
+        return _AlertNoticeItem(
+          filter: n.filter,
+          source: n.source,
+          title: n.title,
+          description: n.description,
+          timeLabel: n.timeLabel,
+          icon: n.icon,
+          accentColor: n.accentColor,
+          actionLabel: n.actionLabel,
+          calendarEventId: n.calendarEventId,
+          appointmentId: n.appointmentId,
+          reminderType: n.reminderType,
+          isRead: true,
+          scheduledAt: n.scheduledAt,
+        );
+      }).toList();
+    });
+  }
+
+  Future<void> _markAdminEventsAsRead() async {
+    final uid = SupabaseService.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    final unreadAdmin = _upcomingNotifications
+        .where((n) =>
+            n.source == _NoticeSource.adminEvent &&
+            !n.isRead &&
+            n.calendarEventId != null)
+        .toList();
+    if (unreadAdmin.isEmpty) return;
+
+    final ids = unreadAdmin
+        .map((n) => n.calendarEventId)
+        .whereType<String>()
+        .toSet();
+
+    // Only insert what isn't already read.
+    final readRes = await SupabaseService.client
+        .from('admin_calendar_event_notification_reads')
+        .select('calendar_event_id')
+        .eq('user_id', uid);
+    final readRows = List<Map<String, dynamic>>.from(
+      (readRes as dynamic) as List,
+    );
+    final readIds = <String>{};
+    for (final r in readRows) {
+      final id = r['calendar_event_id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      readIds.add(id);
+    }
+
+    final missing = ids.where((id) => !readIds.contains(id)).toList();
+    if (missing.isNotEmpty) {
+      try {
+        await SupabaseService.client
+            .from('admin_calendar_event_notification_reads')
+            .insert(
+              missing
+                  .map((id) => <String, dynamic>{
+                        'user_id': uid,
+                        'calendar_event_id': id,
+                      })
+                  .toList(),
+            );
+      } catch (_) {
+        // ignore duplicates
+      }
+    }
+
+    // Update UI immediately.
+    if (!mounted) return;
+    setState(() {
+      _upcomingNotifications = _upcomingNotifications.map((n) {
+        if (n.source != _NoticeSource.adminEvent) return n;
+        if (n.calendarEventId == null) return n;
+        if (!ids.contains(n.calendarEventId)) return n;
+        if (n.isRead) return n;
+        return _AlertNoticeItem(
+          filter: n.filter,
+          source: n.source,
+          title: n.title,
+          description: n.description,
+          timeLabel: n.timeLabel,
+          icon: n.icon,
+          accentColor: n.accentColor,
+          actionLabel: n.actionLabel,
+          calendarEventId: n.calendarEventId,
+          appointmentId: n.appointmentId,
+          reminderType: n.reminderType,
+          isRead: true,
+          scheduledAt: n.scheduledAt,
+        );
+      }).toList();
+    });
   }
 
   Widget _buildSimpleDropdown<T>({
@@ -1265,123 +2395,56 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   Widget _buildFamilyMemberCard(
     BuildContext context,
-    _FamilyMemberOverview member,
-  ) {
+    _FamilyMemberOverview member, {
+    VoidCallback? onTap,
+    bool showPlanButton = true,
+  }) {
     final scale = AppTheme.scale(context, 1.0);
     final accent = member.group.color;
-    return Container(
-      padding: EdgeInsets.all(scale * 14),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [accent.withValues(alpha: 0.26), Colors.white],
-        ),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: accent.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              CircleAvatar(
-                radius: 20 * scale,
-                backgroundColor: accent.withValues(alpha: 0.22),
-                child: Text(
-                  member.name[0],
-                  style: TextStyle(
-                    color: accent,
-                    fontWeight: FontWeight.w800,
-                    fontSize: scale * 15,
-                  ),
-                ),
-              ),
-              SizedBox(width: scale * 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      member.name,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                    SizedBox(height: scale * 2),
-                    Text(
-                      member.profileLabel,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    SizedBox(height: scale * 2),
-                    Text(
-                      member.detailLine,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppTheme.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              SizedBox(width: scale * 8),
-              _buildStatusBadge(
-                context,
-                member.summaryBadge,
-                member.summaryBadgeColor,
-              ),
-            ],
-          ),
-          if (member.highlights.isNotEmpty) ...[
-            SizedBox(height: scale * 10),
-            Wrap(
-              spacing: scale * 6,
-              runSpacing: scale * 6,
-              children: member.highlights
-                  .map(
-                    (highlight) => Container(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: scale * 10,
-                        vertical: scale * 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.6),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        highlight,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppTheme.textPrimary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  )
-                  .toList(),
+        child: Container(
+          padding: EdgeInsets.all(scale * 14),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [accent.withValues(alpha: 0.26), Colors.white],
             ),
-          ],
-          SizedBox(height: scale * 10),
-          Divider(color: accent.withValues(alpha: 0.28), height: 1),
-          SizedBox(height: scale * 8),
-          ...member.careItems.asMap().entries.map((entry) {
-            final isLast = entry.key == member.careItems.length - 1;
-            final item = entry.value;
-            return Padding(
-              padding: EdgeInsets.only(bottom: isLast ? 0 : scale * 10),
-              child: Row(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: accent.withValues(alpha: 0.3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  CircleAvatar(
+                    radius: 20 * scale,
+                    backgroundColor: accent.withValues(alpha: 0.22),
+                    child: Text(
+                      member.name[0],
+                      style: TextStyle(
+                        color: accent,
+                        fontWeight: FontWeight.w800,
+                        fontSize: scale * 15,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: scale * 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          item.title,
-                          style: Theme.of(context).textTheme.bodyMedium
+                          member.name,
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
                               ?.copyWith(
                                 fontWeight: FontWeight.w700,
                                 color: AppTheme.textPrimary,
@@ -1389,142 +2452,180 @@ class _CalendarScreenState extends State<CalendarScreen> {
                         ),
                         SizedBox(height: scale * 2),
                         Text(
-                          _formatTagalogDateTime(item.dateTime),
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: AppTheme.textSecondary),
+                          member.profileLabel,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: accent,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                        ),
+                        SizedBox(height: scale * 2),
+                        Text(
+                          member.detailLine,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: AppTheme.textSecondary,
+                                  ),
                         ),
                       ],
                     ),
                   ),
                   SizedBox(width: scale * 8),
-                  _buildStatusBadge(
-                    context,
-                    item.statusLabel,
-                    item.statusColor,
-                  ),
+                  if (onTap != null)
+                    Icon(Icons.edit_outlined,
+                        size: 18, color: AppTheme.textTertiary),
                 ],
               ),
-            );
-          }),
-          SizedBox(height: scale * 8),
-          Align(
-            alignment: Alignment.center,
-            child: TextButton(
-              onPressed: _openFamilyMembersScreen,
-              child: const Text(
-                'TINGNAN ANG PLANONG PANGKALUSUGAN',
-                style: TextStyle(fontWeight: FontWeight.w800),
-              ),
-            ),
+              if (showPlanButton) ...[
+                SizedBox(height: scale * 8),
+                Align(
+                  alignment: Alignment.center,
+                  child: TextButton(
+                    onPressed: _openFamilyMembersScreen,
+                    child: const Text(
+                      'TINGNAN ANG PLANONG PANGKALUSUGAN',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ),
+              ],
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildAlertCard(BuildContext context, _AlertNoticeItem item) {
+  Widget _buildAlertCard(
+    BuildContext context,
+    _AlertNoticeItem item, {
+    VoidCallback? onTap,
+  }) {
     final scale = AppTheme.scale(context, 1.0);
-    return IntrinsicHeight(
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: item.accentColor.withValues(alpha: 0.18)),
-          boxShadow: [
-            BoxShadow(
-              color: item.accentColor.withValues(alpha: 0.05),
-              blurRadius: 12,
-              offset: const Offset(0, 5),
-            ),
-          ],
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Container(
-              width: scale * 6,
-              decoration: BoxDecoration(
-                color: item.accentColor,
-                borderRadius: const BorderRadius.horizontal(
-                  left: Radius.circular(16),
-                ),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: IntrinsicHeight(
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: item.accentColor.withValues(alpha: 0.18),
               ),
+              boxShadow: [
+                BoxShadow(
+                  color: item.accentColor.withValues(alpha: 0.05),
+                  blurRadius: 12,
+                  offset: const Offset(0, 5),
+                ),
+              ],
             ),
-            Expanded(
-              child: Padding(
-                padding: EdgeInsets.all(scale * 12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Container(
-                      width: scale * 38,
-                      height: scale * 38,
-                      decoration: BoxDecoration(
-                        color: item.accentColor.withValues(alpha: 0.12),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        item.icon,
-                        color: item.accentColor,
-                        size: scale * 20,
-                      ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  width: scale * 6,
+                  decoration: BoxDecoration(
+                    color: item.accentColor,
+                    borderRadius: const BorderRadius.horizontal(
+                      left: Radius.circular(16),
                     ),
-                    SizedBox(width: scale * 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.title,
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  color: AppTheme.textPrimary,
-                                ),
-                          ),
-                          SizedBox(height: scale * 4),
-                          Text(
-                            item.description,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: AppTheme.textSecondary,
-                                  height: 1.35,
-                                ),
-                          ),
-                          SizedBox(height: scale * 6),
-                          Text(
-                            item.timeLabel,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: AppTheme.textTertiary),
-                          ),
-                        ],
-                      ),
-                    ),
-                    SizedBox(width: scale * 8),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
+                  ),
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.all(scale * 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _buildStatusBadge(
-                          context,
-                          item.filter.label,
-                          item.filter.color,
+                        Container(
+                          width: scale * 38,
+                          height: scale * 38,
+                          decoration: BoxDecoration(
+                            color: item.accentColor.withValues(alpha: 0.12),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            item.icon,
+                            color: item.accentColor,
+                            size: scale * 20,
+                          ),
                         ),
-                        SizedBox(height: scale * 16),
-                        Text(
-                          '${item.actionLabel} >',
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(
-                                color: AppTheme.primaryBlue,
-                                fontWeight: FontWeight.w700,
+                        SizedBox(width: scale * 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.title,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodyMedium
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                      color: AppTheme.textPrimary,
+                                    ),
                               ),
+                              SizedBox(height: scale * 4),
+                              Text(
+                                item.description,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: AppTheme.textSecondary,
+                                      height: 1.35,
+                                    ),
+                              ),
+                              SizedBox(height: scale * 6),
+                              Text(
+                                item.timeLabel,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(color: AppTheme.textTertiary),
+                              ),
+                            ],
+                          ),
+                        ),
+                        SizedBox(width: scale * 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            _buildStatusBadge(
+                              context,
+                          item.source == _NoticeSource.appointmentReminder
+                              ? (item.isRead
+                                  ? 'Appointments'
+                                  : 'Appointments · Bago')
+                              : (item.isRead ? 'Announcement' : 'Announcement · Bago'),
+                          item.source == _NoticeSource.appointmentReminder
+                              ? AppTheme.adolescentBlue
+                              : AppTheme.accentTeal,
+                            ),
+                            SizedBox(height: scale * 16),
+                            Text(
+                              '${item.actionLabel} >',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: AppTheme.primaryBlue,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -1757,7 +2858,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final dayEvents = isOutside
         ? <CalendarHealthEvent>[]
         : _getVisibleEventsForDay(day);
-    final groupsForDots = dayEvents.map((e) => e.group).toSet().toList();
+    // One small circle per age group that has an event on this day (legend order).
+    final groupSet = dayEvents.map((e) => e.group).toSet();
+    final groupsForDots = HealthEventGroup.values
+        .where((g) => groupSet.contains(g))
+        .toList();
 
     Widget number = Text(
       '${day.day}',
@@ -1795,24 +2900,25 @@ class _CalendarScreenState extends State<CalendarScreen> {
         children: [
           number,
           if (groupsForDots.isNotEmpty) ...[
-            SizedBox(height: 2 * scale),
+            SizedBox(height: 3 * scale),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               mainAxisSize: MainAxisSize.min,
-              children: groupsForDots
-                  .take(5)
-                  .map(
-                    (g) => Container(
-                width: 6 * scale,
-                height: 6 * scale,
-                margin: EdgeInsets.symmetric(horizontal: 1 * scale),
-                decoration: BoxDecoration(
-                  color: g.color,
-                  shape: BoxShape.circle,
-                ),
+              children: groupsForDots.map((g) {
+                return Container(
+                  width: 7 * scale,
+                  height: 7 * scale,
+                  margin: EdgeInsets.symmetric(horizontal: 1.5 * scale),
+                  decoration: BoxDecoration(
+                    color: g.color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: AppTheme.calendarBorderThin.withValues(alpha: 0.6),
+                      width: 0.5,
                     ),
-                  )
-                  .toList(),
+                  ),
+                );
+              }).toList(),
             ),
           ],
         ],
@@ -1921,6 +3027,33 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                                       ),
                                                 ),
                                               ],
+                                              if (e.time != null || e.facility != null) ...[
+                                                SizedBox(height: 4 * scale),
+                                                Wrap(
+                                                  spacing: 12 * scale,
+                                                  runSpacing: 2 * scale,
+                                                  children: [
+                                                    if (e.time != null)
+                                                      Row(
+                                                        mainAxisSize: MainAxisSize.min,
+                                                        children: [
+                                                          Icon(Icons.schedule_outlined, size: 12 * scale, color: AppTheme.textSecondary),
+                                                          SizedBox(width: 4 * scale),
+                                                          Text(e.time!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppTheme.textSecondary)),
+                                                        ],
+                                                      ),
+                                                    if (e.facility != null)
+                                                      Row(
+                                                        mainAxisSize: MainAxisSize.min,
+                                                        children: [
+                                                          Icon(Icons.location_on_outlined, size: 12 * scale, color: AppTheme.textSecondary),
+                                                          SizedBox(width: 4 * scale),
+                                                          Text(e.facility!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: AppTheme.textSecondary)),
+                                                        ],
+                                                      ),
+                                                  ],
+                                                ),
+                                              ],
                                               SizedBox(height: 2 * scale),
                                               Text(
                                                 e.group.label,
@@ -1932,6 +3065,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
                                                     fontWeight: FontWeight.w600,
                                                     ),
                                               ),
+                                              if (e.ageRangeNote != null) ...[
+                                                SizedBox(height: 2 * scale),
+                                                Text(
+                                                  e.ageRangeNote!,
+                                                  style: Theme.of(context)
+                                                      .textTheme
+                                                      .labelSmall
+                                                      ?.copyWith(
+                                                        color: AppTheme.textSecondary,
+                                                        fontWeight: FontWeight.w600,
+                                                      ),
+                                                ),
+                                              ],
                                             ],
                                           ),
                                         ),
@@ -1972,11 +3118,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
         : HealthEventGroup.values;
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: 8 * scale, vertical: 8 * scale),
-      child: Wrap(
-        spacing: 10 * scale,
-        runSpacing: 6 * scale,
-        alignment: WrapAlignment.center,
-        children: visibleGroups
+      child: SizedBox(
+        width: double.infinity,
+        child: Wrap(
+          spacing: 10 * scale,
+          runSpacing: 6 * scale,
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: visibleGroups
             .map(
               (g) => Row(
           mainAxisSize: MainAxisSize.min,
@@ -2006,6 +3155,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
             )
             .toList(),
+        ),
       ),
     );
   }

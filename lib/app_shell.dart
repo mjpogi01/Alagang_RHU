@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'theme/app_theme.dart';
 import 'l10n/app_strings.dart';
 import 'screens/bulletin_board_screen.dart';
@@ -6,6 +7,8 @@ import 'screens/home_screen.dart';
 import 'screens/placeholder_screens.dart';
 import 'screens/more_screen.dart';
 import 'screens/service_directory_screen.dart';
+import 'services/notification_service.dart';
+import 'services/supabase_service.dart';
 
 /// Root scaffold with bottom navigation (Home, Serbisyo, Bulletin, Resources, More).
 class AppShell extends StatefulWidget {
@@ -17,6 +20,89 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _currentIndex = 0;
+  RealtimeChannel? _announcementChannel;
+  final Set<String> _shownAnnouncementEventIds = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _startAnnouncementListener();
+  }
+
+  @override
+  void dispose() {
+    _announcementChannel?.unsubscribe();
+    super.dispose();
+  }
+
+  void _startAnnouncementListener() {
+    final uid = SupabaseService.client.auth.currentUser?.id;
+    if (uid == null) return;
+    if (_announcementChannel != null) return;
+
+    final ch = SupabaseService.client.channel('calendar_announcements');
+
+    Future<void> handleRecord(Map<String, dynamic> record) async {
+      final send = record['send_announcement'] as bool? ?? false;
+      if (!send) return;
+      final id = record['id']?.toString() ?? '';
+      if (id.isEmpty) return;
+      if (_shownAnnouncementEventIds.contains(id)) return;
+
+      // Best-effort: only notify if user hasn't read it yet.
+      try {
+        final read = await SupabaseService.client
+            .from('admin_calendar_event_notification_reads')
+            .select('calendar_event_id')
+            .eq('user_id', uid)
+            .eq('calendar_event_id', id)
+            .maybeSingle();
+        if (read != null) return;
+      } catch (_) {
+        // ignore: avoid_catches_without_on_clauses
+      }
+
+      final title = (record['announcement_title'] as String?)?.trim();
+      final body = (record['announcement_body'] as String?)?.trim();
+      final fallbackTitle = (record['title'] as String?)?.trim();
+
+      _shownAnnouncementEventIds.add(id);
+      await NotificationService.showInstant(
+        title: (title != null && title.isNotEmpty)
+            ? title
+            : (fallbackTitle != null && fallbackTitle.isNotEmpty)
+                ? fallbackTitle
+                : 'Bagong abiso',
+        body: (body != null && body.isNotEmpty)
+            ? body
+            : 'May bagong iskedyul na ipinost ng RHU. Tingnan ang Abiso para sa detalye.',
+      );
+    }
+
+    ch.onPostgresChanges(
+      event: PostgresChangeEvent.insert,
+      schema: 'public',
+      table: 'calendar_events',
+      callback: (payload) {
+        final rec = Map<String, dynamic>.from(payload.newRecord);
+        handleRecord(rec);
+      },
+    );
+
+    // If admin toggles send_announcement later, treat it as a new announcement.
+    ch.onPostgresChanges(
+      event: PostgresChangeEvent.update,
+      schema: 'public',
+      table: 'calendar_events',
+      callback: (payload) {
+        final rec = Map<String, dynamic>.from(payload.newRecord);
+        handleRecord(rec);
+      },
+    );
+
+    _announcementChannel = ch;
+    ch.subscribe();
+  }
 
   static const List<({String label, IconData icon, Widget screen})> _tabs = [
     (label: AppStrings.navHome, icon: Icons.home_rounded, screen: HomeScreen()),

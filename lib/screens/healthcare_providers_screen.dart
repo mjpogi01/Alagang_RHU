@@ -3,6 +3,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/healthcare_facility.dart';
+import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/healthcare_provider_map.dart';
 
@@ -17,7 +18,9 @@ class HealthcareProvidersScreen extends StatefulWidget {
 }
 
 class _HealthcareProvidersScreenState extends State<HealthcareProvidersScreen> {
-  late int _selectedIndex;
+  int _selectedIndex = 0;
+  List<HealthcareFacility> _facilities = [];
+  bool _facilitiesLoading = true;
   final MapController _mapController = MapController();
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
@@ -27,7 +30,34 @@ class _HealthcareProvidersScreenState extends State<HealthcareProvidersScreen> {
   @override
   void initState() {
     super.initState();
-    _selectedIndex = defaultSelectedFacilityIndex;
+    _loadFacilities();
+  }
+
+  Future<void> _loadFacilities() async {
+    try {
+      final res = await SupabaseService.client
+          .from('health_facilities')
+          .select('name, type, address, phone, latitude, longitude, services')
+          .order('name');
+      final rows = List<Map<String, dynamic>>.from(res as List);
+      final list = rows
+          .map((r) => HealthcareFacility.fromSupabaseRow(r))
+          .whereType<HealthcareFacility>()
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _facilities = list.isNotEmpty ? list : sortedHealthcareFacilities;
+        _facilitiesLoading = false;
+        if (_selectedIndex >= _facilities.length) _selectedIndex = 0;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _facilities = sortedHealthcareFacilities;
+        _facilitiesLoading = false;
+        _selectedIndex = _facilities.length > 0 ? defaultSelectedFacilityIndex.clamp(0, _facilities.length - 1) : 0;
+      });
+    }
   }
 
   @override
@@ -38,9 +68,8 @@ class _HealthcareProvidersScreenState extends State<HealthcareProvidersScreen> {
   }
 
   List<HealthcareFacility> _getFilteredFacilities() {
-    final sorted = sortedHealthcareFacilities;
-    if (_searchQuery.trim().isEmpty) return sorted;
-    return sorted.where((f) => facilityMatchesSearch(f, _searchQuery)).toList();
+    if (_searchQuery.trim().isEmpty) return _facilities;
+    return _facilities.where((f) => facilityMatchesSearch(f, _searchQuery)).toList();
   }
 
   void _selectFacility(int index, {bool scrollToMap = false}) {
@@ -275,11 +304,26 @@ class _HealthcareProvidersScreenState extends State<HealthcareProvidersScreen> {
   }
 
   Widget _buildBody(BuildContext context) {
+    if (_facilitiesLoading) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Kinakarga ang mga pasilidad...'),
+            ],
+          ),
+        ),
+      );
+    }
     final facilities = _getFilteredFacilities();
-    if (_selectedIndex >= facilities.length) {
+    if (_selectedIndex >= facilities.length && facilities.isNotEmpty) {
       _selectedIndex = 0;
     }
-    final selected = facilities.isEmpty ? null : facilities[_selectedIndex];
+    final selected = facilities.isEmpty ? null : facilities[_selectedIndex.clamp(0, facilities.length - 1)];
 
     return Scrollbar(
       controller: _scrollController,

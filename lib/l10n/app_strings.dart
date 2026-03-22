@@ -84,6 +84,8 @@ class AppStrings {
   static const String pregnancyYes = 'Buntis';
   static const String pregnancyNo = 'Hindi buntis';
   static const String pregnancyNA = 'Hindi naaangkop';
+  static const String memberRelation = 'Relasyon sa pamilya (opsyonal)';
+  static const String memberRelationSelect = 'Piliin ang relasyon';
   static const String comorbidities = 'Mga karamdaman';
   static const String comorbiditiesHint =
       'hal. Alta-presyon, Diyabetes, Hika, TB';

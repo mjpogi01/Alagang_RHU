@@ -26,6 +26,7 @@ class FamilyMember {
     this.name,
     required this.dateOfBirth,
     required this.sex,
+    this.relation,
     this.pregnancyStatus,
     List<String>? comorbidities,
   }) : comorbidities = comorbidities ?? [];
@@ -34,6 +35,8 @@ class FamilyMember {
   final String? name;
   final DateTime dateOfBirth;
   final Sex sex;
+  /// Relationship in the family (anak, apo, asawa, etc.).
+  final String? relation;
   final bool?
   pregnancyStatus; // true = pregnant, false = not, null = not applicable (e.g. male)
   final List<String> comorbidities;
@@ -54,6 +57,7 @@ class FamilyMember {
     String? name,
     DateTime? dateOfBirth,
     Sex? sex,
+    String? relation,
     bool? pregnancyStatus,
     List<String>? comorbidities,
   }) {
@@ -62,6 +66,7 @@ class FamilyMember {
       name: name ?? this.name,
       dateOfBirth: dateOfBirth ?? this.dateOfBirth,
       sex: sex ?? this.sex,
+      relation: relation ?? this.relation,
       pregnancyStatus: pregnancyStatus ?? this.pregnancyStatus,
       comorbidities: comorbidities ?? List<String>.from(this.comorbidities),
     );

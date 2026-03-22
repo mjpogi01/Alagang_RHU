@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/family_member.dart';
+import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
-import 'family_members_screen.dart';
+import 'calendar_screen.dart';
+import 'service_schedules_flow.dart';
 
 enum _ServiceDirectoryTab { lahat, itinatampok }
 
@@ -24,21 +26,48 @@ class ServiceDirectoryScreen extends StatefulWidget {
   State<ServiceDirectoryScreen> createState() => _ServiceDirectoryScreenState();
 }
 
+/// Icon name from DB -> IconData for service directory.
+const Map<String, IconData> _serviceDirectoryIconMap = {
+  'group_outlined': Icons.group_outlined,
+  'monitor_heart_outlined': Icons.monitor_heart_outlined,
+  'favorite_border': Icons.favorite_border,
+  'timelapse_outlined': Icons.timelapse_outlined,
+  'vaccines_outlined': Icons.vaccines_outlined,
+  'description_outlined': Icons.description_outlined,
+  'local_hospital_outlined': Icons.local_hospital_outlined,
+  'healing_outlined': Icons.healing_outlined,
+};
+
 class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
   _ServiceDirectoryTab _selectedTab = _ServiceDirectoryTab.lahat;
 
   static const Color _bodyBackground = Color(0xFFF3F4F8);
 
-  final List<_ServiceCategory> _categories = const [
+  List<_ServiceCategory> _categories = const [];
+  bool _loading = true;
+  bool _fromSupabase = false;
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+
+  // Featured/recommended tab: DB-backed family members + matching calendar events.
+  final List<FamilyMember> _familyMembersForRecommendations = [];
+  bool _familyLoading = false;
+  String? _familyError;
+
+  bool _recommendedLoading = false;
+  String? _recommendedError;
+  List<Map<String, dynamic>> _recommendedEvents = [];
+
+  static const List<_ServiceCategory> _defaultCategories = [
     _ServiceCategory(
       title: 'Mga Serbisyong Pangkomunidad',
       serviceCountLabel: '3 serbisyo',
       color: Color(0xFFFFCCBC),
       icon: Icons.group_outlined,
       items: [
-        'Mga Serbisyo para sa Pagsusulong ng Kalusugan',
-        'Mga Serbisyo para sa Pagsubaybay sa mga Sakit',
-        'Mga Serbisyo para sa Proteksiyong Pangkalusugan',
+        _ServiceItem(name: 'Mga Serbisyo para sa Pagsusulong ng Kalusugan'),
+        _ServiceItem(name: 'Mga Serbisyo para sa Pagsubaybay sa mga Sakit'),
+        _ServiceItem(name: 'Mga Serbisyo para sa Proteksiyong Pangkalusugan'),
       ],
     ),
     _ServiceCategory(
@@ -47,10 +76,10 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
       color: Color(0xFFBBDEFB),
       icon: Icons.monitor_heart_outlined,
       items: [
-        'Konsultasyong Panlabas',
-        'Mga Serbisyo sa Laboratoryo at Pagsusuri',
-        'Mga Serbisyo sa Ngipin at Kalusugan ng Bibig',
-        'Iba Pang Serbisyong Pangkalusugan para sa Indibidwal',
+        _ServiceItem(name: 'Konsultasyong Panlabas'),
+        _ServiceItem(name: 'Mga Serbisyo sa Laboratoryo at Pagsusuri'),
+        _ServiceItem(name: 'Mga Serbisyo sa Ngipin at Kalusugan ng Bibig'),
+        _ServiceItem(name: 'Iba Pang Serbisyong Pangkalusugan para sa Indibidwal'),
       ],
     ),
     _ServiceCategory(
@@ -59,9 +88,9 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
       color: Color(0xFFF8BBD0),
       icon: Icons.favorite_border,
       items: [
-        'Mga Serbisyo sa Pangangalaga Bago Manganak',
-        'Pangangalaga sa Panganganak at Pagkatapos Manganak',
-        'Pagsusuri at Pagsubaybay sa Bagong Silang',
+        _ServiceItem(name: 'Mga Serbisyo sa Pangangalaga Bago Manganak'),
+        _ServiceItem(name: 'Pangangalaga sa Panganganak at Pagkatapos Manganak'),
+        _ServiceItem(name: 'Pagsusuri at Pagsubaybay sa Bagong Silang'),
       ],
     ),
     _ServiceCategory(
@@ -70,8 +99,8 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
       color: Color(0xFFFFF59D),
       icon: Icons.timelapse_outlined,
       items: [
-        'Pagsusuri sa Nutrisyon at Pagpapayo',
-        'Mga Programa sa Suplementasyon',
+        _ServiceItem(name: 'Pagsusuri sa Nutrisyon at Pagpapayo'),
+        _ServiceItem(name: 'Mga Programa sa Suplementasyon'),
       ],
     ),
     _ServiceCategory(
@@ -80,12 +109,114 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
       color: Color(0xFFB2DFDB),
       icon: Icons.vaccines_outlined,
       items: [
-        'Pagbabakuna sa mga Bata',
-        'Pagbabakuna sa mga Nasa Hustong Gulang at Nakatatanda',
-        'Pagbabakuna sa mga Espesyal na Kampanya',
+        _ServiceItem(name: 'Pagbabakuna sa mga Bata'),
+        _ServiceItem(name: 'Pagbabakuna sa mga Nasa Hustong Gulang at Nakatatanda'),
+        _ServiceItem(name: 'Pagbabakuna sa mga Espesyal na Kampanya'),
       ],
     ),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCategories();
+    _loadFamilyMembersAndRecommendedEvents();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadCategories() async {
+    setState(() => _loading = true);
+    try {
+      final client = SupabaseService.client;
+      final catRes = await client
+          .from('primary_care_categories')
+          .select()
+          .order('sort_order', ascending: true);
+      final svcRes = await client.from('primary_care_services').select();
+      final allCats = List<Map<String, dynamic>>.from(catRes as List);
+      final allSvcs = List<Map<String, dynamic>>.from(svcRes as List);
+      // Exclude archived (migration 010 adds archived_at)
+      final catList = allCats.where((c) => c['archived_at'] == null).toList()
+        ..sort((a, b) => ((a['sort_order'] as int?) ?? 0).compareTo((b['sort_order'] as int?) ?? 0));
+      final svcList = allSvcs.where((s) => s['archived_at'] == null).toList();
+      if (catList.isEmpty) {
+        if (mounted) setState(() {
+          _categories = _defaultCategories;
+          _fromSupabase = false;
+          _loading = false;
+        });
+        return;
+      }
+      final categories = <_ServiceCategory>[];
+      for (final cat in catList) {
+        final id = cat['id'] as String?;
+        final title = cat['title'] as String? ?? '';
+        final colorHex = (cat['color_hex'] as String?) ?? 'BBDEFB';
+        final iconName = cat['icon_name'] as String? ?? 'monitor_heart_outlined';
+        final color = _colorFromHex(colorHex);
+        final icon = _serviceDirectoryIconMap[iconName] ?? Icons.medical_services_outlined;
+        final items = <_ServiceItem>[];
+        if (id != null) {
+          final forCat = svcList
+              .where((s) => s['category_id'] == id)
+              .toList()
+            ..sort((a, b) =>
+                ((a['sort_order'] as int?) ?? 0).compareTo((b['sort_order'] as int?) ?? 0));
+          for (final s in forCat) {
+            final name = s['name'] as String?;
+            if (name != null && name.isNotEmpty) {
+              num? price;
+              final p = s['price'];
+              if (p != null) {
+                if (p is num) {
+                  price = p > 0 ? p : null;
+                } else {
+                  final n = num.tryParse(p.toString().trim());
+                  price = (n != null && n > 0) ? n : null;
+                }
+              }
+              final desc = s['description'] as String?;
+              items.add(_ServiceItem(
+                name: name,
+                description: desc != null && desc.trim().isNotEmpty ? desc.trim() : null,
+                price: price,
+              ));
+            }
+          }
+        }
+        categories.add(_ServiceCategory(
+          title: title,
+          serviceCountLabel: '${items.length} serbisyo',
+          color: color,
+          icon: icon,
+          items: items,
+        ));
+      }
+      if (mounted) setState(() {
+        _categories = categories;
+        _fromSupabase = true;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() {
+        _categories = _defaultCategories;
+        _fromSupabase = false;
+        _loading = false;
+      });
+    }
+  }
+
+  static Color _colorFromHex(String hex) {
+    String h = hex.trim();
+    if (h.startsWith('#')) h = h.substring(1);
+    if (h.length == 6) h = 'FF$h';
+    return Color(int.tryParse(h, radix: 16) ?? 0xFFBBDEFB);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -203,7 +334,9 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
                 Expanded(
                   child: Container(
                     color: _bodyBackground,
-                    child: _buildBody(context),
+                    child: _loading
+                        ? const Center(child: CircularProgressIndicator())
+                        : _buildBody(context),
                   ),
                 ),
               ],
@@ -377,6 +510,7 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
   }
 
   Widget _buildAllServicesContent(BuildContext context) {
+    final filtered = _applySearch(_categories);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -394,7 +528,21 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
         SizedBox(
           height: AppTheme.scale(context, AppTheme.sectionTitleToContent),
         ),
-        ..._categories.map((c) {
+        if (_searchQuery.trim().isNotEmpty && filtered.isEmpty)
+          Padding(
+            padding: EdgeInsets.only(
+              top: AppTheme.scale(context, AppTheme.spacingSm),
+            ),
+            child: Text(
+              'Walang serbisyong tugma sa hinanap.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: AppTheme.textSecondary),
+            ),
+          )
+        else
+          ...filtered.map((c) {
           return Padding(
             padding: EdgeInsets.only(
               bottom: AppTheme.scale(context, AppTheme.spacingMd),
@@ -406,9 +554,11 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
     );
   }
 
-  /// Category indices: 0=Pangkomunidad, 1=Indibidwal, 2=Ina/Bagong Silang, 3=Nutrisyon, 4=Pagbabakuna.
+  /// Category indices (default): 0=Pangkomunidad, 1=Indibidwal, 2=Ina/Bagong Silang, 3=Nutrisyon, 4=Pagbabakuna.
+  /// When data is from Supabase, returns all categories for featured tab.
   List<_ServiceCategory> _categoriesForFamily(List<FamilyMember> members) {
     if (members.isEmpty) return [];
+    if (_fromSupabase || _categories.length != 5) return List.from(_categories);
     final indices = <int>{};
     for (final m in members) {
       final age = m.age;
@@ -433,9 +583,286 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
     return sorted.map((i) => _categories[i]).toList();
   }
 
+  /// Applies current search query to the given categories, returning only
+  /// categories with at least one matching service (by name or description).
+  List<_ServiceCategory> _applySearch(List<_ServiceCategory> source) {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return source;
+    final List<_ServiceCategory> result = [];
+    for (final cat in source) {
+      final matchingItems = cat.items.where((item) {
+        final name = item.name.toLowerCase();
+        final desc = item.description?.toLowerCase() ?? '';
+        return name.contains(q) || desc.contains(q);
+      }).toList();
+      if (matchingItems.isEmpty) continue;
+      result.add(
+        _ServiceCategory(
+          title: cat.title,
+          serviceCountLabel: '${matchingItems.length} serbisyo',
+          color: cat.color,
+          icon: cat.icon,
+          items: matchingItems,
+        ),
+      );
+    }
+    return result;
+  }
+
+  Future<void> _loadFamilyMembersAndRecommendedEvents() async {
+    setState(() {
+      _familyLoading = true;
+      _recommendedLoading = true;
+      _familyError = null;
+      _recommendedError = null;
+    });
+    try {
+      final familyMembers = widget.familyMembers;
+      if (familyMembers != null) {
+        _familyMembersForRecommendations
+          ..clear()
+          ..addAll(familyMembers);
+      } else {
+        final loaded = await _loadFamilyMembersFromSupabase();
+        _familyMembersForRecommendations
+          ..clear()
+          ..addAll(loaded);
+      }
+      setState(() {
+        _familyLoading = false;
+      });
+
+      final events = await _loadRecommendedEventsFromSupabase();
+      setState(() {
+        _recommendedEvents = events;
+        _recommendedLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _familyLoading = false;
+        _recommendedLoading = false;
+        _familyError = e.toString();
+        _recommendedError = e.toString();
+      });
+    }
+  }
+
+  Future<List<FamilyMember>> _loadFamilyMembersFromSupabase() async {
+    final client = SupabaseService.client;
+    final uid = client.auth.currentUser?.id;
+    if (uid == null) return [];
+
+    final familyId = await _ensureFamilyIdForUser(uid);
+    if (familyId == null) return [];
+
+    final res = await client
+        .from('family_members')
+        .select(
+          'id, name, date_of_birth, sex, pregnancy_status, comorbidities',
+        )
+        .eq('family_id', familyId)
+        .order('date_of_birth', ascending: true);
+    final rows = List<Map<String, dynamic>>.from(res as List);
+
+    return rows.map((r) {
+      final id = r['id']?.toString() ?? '';
+      final name = r['name'] as String?;
+      final dobRaw = r['date_of_birth']?.toString();
+      final dob = dobRaw != null ? DateTime.parse(dobRaw.split('T').first) : DateTime.now();
+      final sexDb = r['sex'] as String? ?? 'other';
+      final sex = Sex.values.firstWhere((s) => s.name == sexDb, orElse: () => Sex.other);
+      final preg = r['pregnancy_status'] as bool?;
+      final comorbid =
+          (r['comorbidities'] as List?)?.map((e) => e.toString()).toList() ?? <String>[];
+      return FamilyMember(
+        id: id,
+        name: name,
+        dateOfBirth: dob,
+        sex: sex,
+        pregnancyStatus: preg,
+        comorbidities: comorbid,
+      );
+    }).toList();
+  }
+
+  Future<String?> _ensureFamilyIdForUser(String uid) async {
+    final client = SupabaseService.client;
+
+    try {
+      final mem = await client
+          .from('family_members')
+          .select('family_id')
+          .eq('user_id', uid)
+          .maybeSingle();
+      if (mem != null && mem['family_id'] != null) {
+        return mem['family_id'] as String;
+      }
+    } catch (_) {}
+
+    try {
+      final fam = await client
+          .from('families')
+          .select('id')
+          .eq('decision_maker_user_id', uid)
+          .maybeSingle();
+      if (fam != null && fam['id'] != null) {
+        return fam['id'] as String;
+      }
+    } catch (_) {}
+
+    try {
+      final createdId =
+          await client.rpc('create_my_family', params: {'family_name': null});
+      if (createdId is String) return createdId;
+      return createdId?.toString();
+    } catch (_) {}
+
+    return null;
+  }
+
+  bool _isScheduleStillUpcoming(Map<String, dynamic> event) {
+    final raw = event['event_date']?.toString();
+    if (raw == null || raw.isEmpty) return false;
+    final dateKey = raw.split('T').first;
+    final parts = dateKey.split('-');
+    if (parts.length != 3) return false;
+    final day = DateTime(
+      int.parse(parts[0]),
+      int.parse(parts[1]),
+      int.parse(parts[2]),
+    );
+
+    final now = DateTime.now();
+    final todayStart = DateTime(now.year, now.month, now.day);
+    if (day.isBefore(todayStart)) return false;
+    if (day.isAfter(todayStart)) return true;
+
+    final endT = event['end_time']?.toString();
+    final startT = event['start_time']?.toString();
+
+    DateTime cutoff;
+    if (endT != null && endT.trim().isNotEmpty) {
+      final h = int.tryParse(endT.split(':').first) ?? 0;
+      final m = int.tryParse(endT.split(':').length > 1 ? endT.split(':')[1] : '0') ?? 0;
+      cutoff = DateTime(day.year, day.month, day.day, h, m);
+    } else if (startT != null && startT.trim().isNotEmpty) {
+      final h = int.tryParse(startT.split(':').first) ?? 0;
+      final m = int.tryParse(startT.split(':').length > 1 ? startT.split(':')[1] : '0') ?? 0;
+      cutoff = DateTime(day.year, day.month, day.day, h, m).add(const Duration(hours: 1));
+    } else {
+      cutoff = DateTime(day.year, day.month, day.day, 23, 59, 59);
+    }
+    return now.isBefore(cutoff);
+  }
+
+  List<String> _eventGroupKeys(Map<String, dynamic> e) {
+    final gt = e['group_types'];
+    if (gt is List && gt.isNotEmpty) {
+      return gt.map((x) => x.toString()).toList();
+    }
+    final g = e['group_type'] as String?;
+    if (g == null || g.trim().isEmpty) return <String>['adult'];
+    return <String>[g];
+  }
+
+  bool _memberMatchesGroupKey(FamilyMember m, String groupKey) {
+    final age = m.age;
+    switch (groupKey) {
+      case 'buntis':
+        return m.sex == Sex.female && m.pregnancyStatus == true;
+      case 'bata':
+        return age >= 0 && age <= 9;
+      case 'adolescent':
+        return age >= 10 && age <= 19;
+      case 'adult':
+        return age >= 20 && age <= 59;
+      case 'elderly':
+        return age >= 60;
+      default:
+        return false;
+    }
+  }
+
+  bool _isFamilyMemberEligibleForEvent(
+    FamilyMember m,
+    Map<String, dynamic> event,
+  ) {
+    final groups = _eventGroupKeys(event);
+    if (!groups.any((g) => _memberMatchesGroupKey(m, g))) return false;
+
+    final amin = event['age_range_min'];
+    final amax = event['age_range_max'];
+    final int? minA = amin is int ? amin : int.tryParse(amin?.toString() ?? '');
+    final int? maxA = amax is int ? amax : int.tryParse(amax?.toString() ?? '');
+    final age = m.age;
+
+    if (minA != null && age < minA) return false;
+    if (maxA != null && age > maxA) return false;
+    return true;
+  }
+
+  Future<List<Map<String, dynamic>>> _loadRecommendedEventsFromSupabase() async {
+    final client = SupabaseService.client;
+    final eventsRes = await client
+        .from('calendar_events')
+        .select(
+          'id, event_date, group_type, group_types, title, description, start_time, end_time, facility, age_range_min, age_range_max',
+        )
+        .order('event_date', ascending: true);
+    final events = List<Map<String, dynamic>>.from(eventsRes as List);
+
+    // Only keep events that are still upcoming and match at least one family member.
+    final family = _familyMembersForRecommendations;
+    final out = <Map<String, dynamic>>[];
+    for (final e in events) {
+      if (!_isScheduleStillUpcoming(e)) continue;
+      final anyEligible = family.any((m) => _isFamilyMemberEligibleForEvent(m, e));
+      if (!anyEligible) continue;
+      out.add(e);
+    }
+    return out;
+  }
+
+  List<Map<String, dynamic>> _applySearchToEvents(
+    List<Map<String, dynamic>> source,
+  ) {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return source;
+    return source.where((e) {
+      final title = (e['title'] as String?)?.toLowerCase() ?? '';
+      final desc = (e['description'] as String?)?.toLowerCase() ?? '';
+      final facility = (e['facility'] as String?)?.toLowerCase() ?? '';
+      return title.contains(q) || desc.contains(q) || facility.contains(q);
+    }).toList();
+  }
+
   Widget _buildFeaturedServicesContent(BuildContext context) {
-    final members = widget.familyMembers ?? [];
-    final list = _categoriesForFamily(members);
+    final members = widget.familyMembers ?? _familyMembersForRecommendations;
+
+    if (_familyLoading || _recommendedLoading) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSearchBar(context),
+          SizedBox(height: AppTheme.scale(context, AppTheme.spacingLg)),
+          const Center(child: CircularProgressIndicator()),
+        ],
+      );
+    }
+
+    if (members.isEmpty) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildSearchBar(context),
+          SizedBox(height: AppTheme.scale(context, AppTheme.spacingLg)),
+          _buildFeaturedEmptyState(context),
+        ],
+      );
+    }
+
+    final events = _applySearchToEvents(_recommendedEvents);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -443,7 +870,7 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
         _buildSearchBar(context),
         SizedBox(height: AppTheme.scale(context, AppTheme.spacingLg)),
         Text(
-          'Itinatampok na Serbisyo',
+          'Itinatampok na Iskedyul',
           style: Theme.of(context).textTheme.titleMedium?.copyWith(
             fontSize: AppTheme.scale(context, 12),
             fontWeight: FontWeight.w700,
@@ -453,9 +880,7 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
         ),
         SizedBox(height: AppTheme.scale(context, 4)),
         Text(
-          members.isEmpty
-              ? 'Mga serbisyong nakalaan para sa mga miyembro ng inyong pamilya.'
-              : 'Batay sa mga miyembro ng inyong pamilya.',
+          'Batay sa edad ng mga miyembro ng inyong pamilya.',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: AppTheme.textSecondary,
             height: 1.3,
@@ -464,15 +889,47 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
         SizedBox(
           height: AppTheme.scale(context, AppTheme.sectionTitleToContent),
         ),
-        if (list.isEmpty)
-          _buildFeaturedEmptyState(context)
+        if (_searchQuery.trim().isNotEmpty && events.isEmpty)
+          Padding(
+            padding: EdgeInsets.only(
+              top: AppTheme.scale(context, AppTheme.spacingSm),
+            ),
+            child: Text(
+              'Walang iskedyul na tugma sa hinanap.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: AppTheme.textSecondary),
+            ),
+          )
+        else if (events.isEmpty)
+          Padding(
+            padding: EdgeInsets.only(
+              top: AppTheme.scale(context, AppTheme.spacingSm),
+            ),
+            child: Text(
+              'Walang nakaiskedyul para sa kasalukuyang edad ng inyong pamilya.',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: AppTheme.textSecondary),
+            ),
+          )
         else
-          ...list.map((c) {
+          ...events.asMap().entries.map((entry) {
+            final e = entry.value;
+            final isLast = entry.key == events.length - 1;
             return Padding(
               padding: EdgeInsets.only(
-                bottom: AppTheme.scale(context, AppTheme.spacingMd),
+                bottom: isLast ? 0 : AppTheme.scale(context, AppTheme.spacingMd),
               ),
-              child: _ServiceCategoryCard(category: c),
+              child: _RecommendedEventCard(
+                event: e,
+                onTap: () => showScheduleDetailForBooking(
+                  context,
+                  event: e,
+                ),
+              ),
             );
           }),
       ],
@@ -517,7 +974,10 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute<void>(
-                    builder: (_) => const FamilyMembersScreen(),
+                    builder: (_) => const CalendarScreen(
+                      initialTabIndex: 1,
+                      openAddFamilyMemberModalOnStart: true,
+                    ),
                   ),
                 );
               },
@@ -541,6 +1001,12 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
       shadowColor: Colors.black.withValues(alpha: 0.12),
       borderRadius: BorderRadius.circular(28),
       child: TextField(
+        controller: _searchController,
+        onChanged: (value) {
+          setState(() {
+            _searchQuery = value;
+          });
+        },
         decoration: InputDecoration(
           hintText: 'Anong serbisyo ang kailangan mo?',
           hintStyle: TextStyle(
@@ -548,6 +1014,17 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
             fontSize: scale * 14,
           ),
           prefixIcon: const Icon(Icons.search, color: AppTheme.textTertiary),
+          suffixIcon: _searchQuery.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.close, color: AppTheme.textTertiary),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() {
+                      _searchQuery = '';
+                    });
+                  },
+                ),
           filled: true,
           fillColor: Colors.white,
           border: OutlineInputBorder(
@@ -564,6 +1041,249 @@ class _ServiceDirectoryScreenState extends State<ServiceDirectoryScreen> {
   }
 }
 
+class _RecommendedEventCard extends StatelessWidget {
+  const _RecommendedEventCard({
+    required this.event,
+    required this.onTap,
+  });
+
+  final Map<String, dynamic> event;
+  final VoidCallback onTap;
+
+  static const Map<String, Color> _groupColor = {
+    'buntis': AppTheme.buntisPink,
+    'bata': AppTheme.pediatricGreen,
+    'adolescent': AppTheme.adolescentBlue,
+    'adult': AppTheme.adultOrange,
+    'elderly': AppTheme.elderlyPurple,
+  };
+
+  static const Map<String, String> _groupLabel = {
+    'buntis': 'Buntis',
+    'bata': 'Bata',
+    'adolescent': 'Kabataan',
+    'adult': 'Nasa hustong gulang',
+    'elderly': 'Nakatatanda',
+  };
+
+  static const List<String> _months = [
+    'Enero',
+    'Pebrero',
+    'Marso',
+    'Abril',
+    'Mayo',
+    'Hunyo',
+    'Hulyo',
+    'Agosto',
+    'Setyembre',
+    'Oktubre',
+    'Nobyembre',
+    'Disyembre',
+  ];
+
+  static String _formatDate(String? raw) {
+    if (raw == null || raw.isEmpty) return '';
+    final s = raw.split('T').first;
+    final parts = s.split('-');
+    if (parts.length != 3) return s;
+    final y = int.tryParse(parts[0]) ?? 0;
+    final m = int.tryParse(parts[1]) ?? 1;
+    final d = int.tryParse(parts[2]) ?? 1;
+    if (m < 1 || m > 12) return s;
+    return '${_months[m - 1]} $d, $y';
+  }
+
+  static String _formatClock(String? dbTime) {
+    if (dbTime == null || dbTime.trim().isEmpty) return '';
+    final p = dbTime.split(':');
+    final h = int.tryParse(p[0]) ?? 0;
+    final m = p.length > 1 ? int.tryParse(p[1]) ?? 0 : 0;
+    final period = h >= 12 ? 'PM' : 'AM';
+    final hour12 = h == 0 ? 12 : (h > 12 ? h - 12 : h);
+    return '$hour12:${m.toString().padLeft(2, '0')} $period';
+  }
+
+  static String _formatTimeRange(String? start, String? end) {
+    final a = _formatClock(start);
+    final b = _formatClock(end);
+    if (a.isEmpty && b.isEmpty) return 'Walang itinakdang oras';
+    if (b.isEmpty) return a;
+    if (a.isEmpty) return b;
+    return '$a – $b';
+  }
+
+  List<String> _groupKeys() {
+    final gt = event['group_types'];
+    if (gt is List && gt.isNotEmpty) {
+      return gt.map((x) => x.toString()).toList();
+    }
+    final g = event['group_type'] as String?;
+    if (g == null || g.trim().isEmpty) return const ['adult'];
+    return [g];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final groups = _groupKeys();
+    final lead = groups.isNotEmpty ? groups.first : 'adult';
+    final accent = _groupColor[lead] ?? AppTheme.adultOrange;
+    final title = (event['title'] as String?)?.trim().isNotEmpty == true
+        ? event['title'] as String
+        : 'Iskedyul';
+    final facility = (event['facility'] as String?)?.trim();
+    final desc = (event['description'] as String?)?.trim();
+    final dateStr = _formatDate(event['event_date']?.toString());
+    final timeStr = _formatTimeRange(
+      event['start_time']?.toString(),
+      event['end_time']?.toString(),
+    );
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: accent.withValues(alpha: 0.22)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.04),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              )
+            ],
+          ),
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 6,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: accent,
+                      borderRadius: const BorderRadius.horizontal(
+                        left: Radius.circular(10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w800,
+                                color: AppTheme.textPrimary,
+                              ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          dateStr.isEmpty ? 'Petsa' : dateStr,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: AppTheme.textSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          timeStr,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: AppTheme.textTertiary,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.chevron_right, color: AppTheme.textTertiary),
+                ],
+              ),
+              if (facility != null && facility.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(Icons.location_on_outlined,
+                        size: 16, color: AppTheme.textTertiary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        facility,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: AppTheme.textSecondary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (desc != null && desc.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  desc,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppTheme.textSecondary,
+                      ),
+                ),
+              ],
+              if (groups.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: groups.take(3).map((g) {
+                    final c = _groupColor[g] ?? accent;
+                    return Chip(
+                      label: Text(_groupLabel[g] ?? g,
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: c)),
+                      backgroundColor: c.withValues(alpha: 0.12),
+                      side: BorderSide.none,
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                      materialTapTargetSize:
+                          MaterialTapTargetSize.shrinkWrap,
+                    );
+                  }).toList(),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One service line: name, optional description, and optional price (null or 0 = free).
+class _ServiceItem {
+  const _ServiceItem({required this.name, this.description, this.price});
+
+  final String name;
+  final String? description;
+  final num? price;
+
+  bool get isFree => price == null || (price is num && price! <= 0);
+  String get priceBadgeLabel {
+    if (isFree) return 'Free';
+    final p = price!;
+    return '₱${p.toStringAsFixed(p.truncateToDouble() == p ? 0 : 2)}';
+  }
+}
+
 class _ServiceCategory {
   const _ServiceCategory({
     required this.title,
@@ -577,7 +1297,7 @@ class _ServiceCategory {
   final String serviceCountLabel;
   final Color color;
   final IconData icon;
-  final List<String> items;
+  final List<_ServiceItem> items;
 }
 
 class _ServiceCategoryCard extends StatefulWidget {
@@ -733,8 +1453,17 @@ class _ServiceCategoryCardState extends State<_ServiceCategoryCard> {
                       ),
                       child: _ServiceItemRow(
                         index: i + 1,
-                        label: c.items[i],
+                        item: c.items[i],
                         color: AppTheme.accentTeal,
+                        onTap: () {
+                          showServiceSchedulesFlow(
+                            context,
+                            serviceName: c.items[i].name,
+                            description: c.items[i].description,
+                            isFree: c.items[i].isFree,
+                            priceLabel: c.items[i].priceBadgeLabel,
+                          );
+                        },
                       ),
                     ),
                 ],
@@ -750,65 +1479,172 @@ class _ServiceCategoryCardState extends State<_ServiceCategoryCard> {
 class _ServiceItemRow extends StatelessWidget {
   const _ServiceItemRow({
     required this.index,
-    required this.label,
+    required this.item,
     required this.color,
+    required this.onTap,
   });
 
   final int index;
-  final String label;
+  final _ServiceItem item;
   final Color color;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final scale = AppTheme.scale(context, 1.0);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Container(
-          width: scale * 28,
-          height: scale * 28,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            shape: BoxShape.circle,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppTheme.spacingRadiusSm * 1.2),
+        child: Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(AppTheme.spacingRadiusSm * 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
           ),
-          child: Center(
-            child: Text(
-              index.toString(),
-              style: TextStyle(
-                fontSize: AppTheme.scale(context, 12),
-                fontWeight: FontWeight.w700,
-                color: color,
+        ],
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          vertical: scale * 8,
+          horizontal: AppTheme.scale(context, AppTheme.spacingSm),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: scale * 28,
+              height: scale * 28,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Center(
+                child: Text(
+                  index.toString(),
+                  style: TextStyle(
+                    fontSize: AppTheme.scale(context, 12),
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
-        SizedBox(width: AppTheme.scale(context, AppTheme.spacingMd)),
-        Expanded(
-          child: Container(
-            padding: EdgeInsets.symmetric(
-              vertical: scale * 10,
-              horizontal: AppTheme.scale(context, AppTheme.spacingMd),
-            ),
-            decoration: BoxDecoration(
-              color: AppTheme.bannerLight,
-              borderRadius: BorderRadius.circular(AppTheme.spacingRadiusSm),
-            ),
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                fontSize: AppTheme.scale(context, 13),
-                color: AppTheme.textPrimary,
+            SizedBox(width: AppTheme.scale(context, AppTheme.spacingSm)),
+            Expanded(
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  vertical: scale * 10,
+                  horizontal: AppTheme.scale(context, AppTheme.spacingMd),
+                ),
+                decoration: BoxDecoration(
+                  color: AppTheme.bannerLight,
+                  borderRadius:
+                      BorderRadius.circular(AppTheme.spacingRadiusSm * 1.1),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            item.name,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(
+                                  fontSize: AppTheme.scale(context, 13.5),
+                                  fontWeight: FontWeight.w600,
+                                  color: AppTheme.textPrimary,
+                                ),
+                          ),
+                          if (item.description != null &&
+                              item.description!.isNotEmpty) ...[
+                            SizedBox(height: scale * 4),
+                            Text(
+                              item.description!,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    fontSize: AppTheme.scale(context, 12),
+                                    color: AppTheme.textSecondary,
+                                  ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    SizedBox(
+                        width:
+                            AppTheme.scale(context, AppTheme.spacingSm * 0.8)),
+                    _ServicePriceBadge(
+                      isFree: item.isFree,
+                      label: item.priceBadgeLabel,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
+            SizedBox(width: AppTheme.scale(context, AppTheme.spacingSm)),
+            Container(
+              width: scale * 26,
+              height: scale * 26,
+              decoration: BoxDecoration(
+                color: AppTheme.searchBarBackground,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.chevron_right,
+                size: scale * 18,
+                color: AppTheme.textTertiary,
+              ),
+            ),
+          ],
         ),
-        SizedBox(width: AppTheme.scale(context, AppTheme.spacingSm)),
-        Icon(
-          Icons.chevron_right,
-          size: scale * 20,
-          color: AppTheme.textTertiary,
+      ),
+    ),
+      ),
+    );
+  }
+}
+
+class _ServicePriceBadge extends StatelessWidget {
+  const _ServicePriceBadge({required this.isFree, required this.label});
+
+  final bool isFree;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = AppTheme.scale(context, 1.0);
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: scale * 8,
+        vertical: scale * 4,
+      ),
+      decoration: BoxDecoration(
+        color: isFree
+            ? AppTheme.accentTeal.withValues(alpha: 0.15)
+            : AppTheme.textTertiary.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(AppTheme.spacingRadiusSm),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: scale * 11,
+          fontWeight: FontWeight.w600,
+          color: isFree ? AppTheme.accentTeal : AppTheme.textSecondary,
         ),
-      ],
+      ),
     );
   }
 }

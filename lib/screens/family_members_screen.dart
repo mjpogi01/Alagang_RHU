@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../l10n/app_strings.dart';
 import '../models/family_member.dart';
+import '../services/supabase_service.dart';
 
 const List<String> _tagalogMonthNames = [
   'Enero',
@@ -32,31 +33,180 @@ class FamilyMembersScreen extends StatefulWidget {
 
 class _FamilyMembersScreenState extends State<FamilyMembersScreen> {
   final List<FamilyMember> _members = [];
+  bool _loading = true;
+  String? _error;
+  String? _familyId;
+
+  static const Map<String, String> _relationOptions = {
+    'anak': 'Anak',
+    'apo': 'Apo',
+    'asawa': 'Asawa',
+    'pamangkin': 'Pamangkin',
+    'ina': 'Ina',
+    'ama': 'Ama',
+    'lolo': 'Lolo',
+    'lola': 'Lola',
+    'tita': 'Tita',
+    'tito': 'Tito',
+    'lola_sa_tuhod': 'Lola sa tuhod',
+    'lolo_sa_tuhod': 'Lolo sa tuhod',
+    'pinsan': 'Pinsan',
+  };
+
+  FamilyMember _familyMemberFromRow(Map<String, dynamic> r) {
+    final id = (r['id'] as String?) ?? '';
+    final dobRaw = r['date_of_birth']?.toString().split('T').first;
+    final dob = dobRaw != null ? DateTime.parse(dobRaw) : DateTime.now();
+    final sexDb = (r['sex'] as String?) ?? 'other';
+    final sex = Sex.values.firstWhere(
+      (s) => s.name == sexDb,
+      orElse: () => Sex.other,
+    );
+    final preg = r['pregnancy_status'] as bool?;
+    final relation = (r['relation'] as String?)?.trim();
+    final comorbid =
+        (r['comorbidities'] as List?)?.map((e) => e.toString()).toList() ??
+            <String>[];
+    return FamilyMember(
+      id: id,
+      name: (r['name'] as String?)?.trim(),
+      dateOfBirth: dob,
+      sex: sex,
+      relation: relation,
+      pregnancyStatus: preg,
+      comorbidities: comorbid,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMembers();
+  }
+
+  Future<void> _loadMembers() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final client = SupabaseService.client;
+      final uid = client.auth.currentUser?.id;
+      if (uid == null) {
+        setState(() {
+          _loading = false;
+          _error = 'Kailangan nakalag‑in upang pamahalaan ang pamilya.';
+        });
+        return;
+      }
+
+      String? familyId;
+      try {
+        final mem = await client
+            .from('family_members')
+            .select('family_id')
+            .eq('user_id', uid)
+            .maybeSingle();
+        if (mem != null && mem['family_id'] != null) {
+          familyId = mem['family_id'] as String;
+        }
+      } catch (_) {}
+
+      if (familyId == null) {
+        try {
+          final fam = await client
+              .from('families')
+              .select('id')
+              .eq('decision_maker_user_id', uid)
+              .maybeSingle();
+          if (fam != null && fam['id'] != null) {
+            familyId = fam['id'] as String;
+          }
+        } catch (_) {}
+      }
+
+      if (familyId == null) {
+        // Create a family for this user using the helper function.
+        final createdId =
+            await client.rpc('create_my_family', params: {'family_name': null});
+        if (createdId is String) {
+          familyId = createdId;
+        } else if (createdId != null) {
+          familyId = createdId.toString();
+        }
+      }
+
+      if (familyId == null) {
+        setState(() {
+          _loading = false;
+          _error = 'Hindi makuha o magawa ang pamilya. Subukang muli mamaya.';
+        });
+        return;
+      }
+
+      final res = await client
+          .from('family_members')
+          .select(
+              'id, name, date_of_birth, sex, pregnancy_status, comorbidities, relation')
+          .eq('family_id', familyId)
+          .order('date_of_birth', ascending: true);
+      final rows = List<Map<String, dynamic>>.from(res as List);
+      final members = rows.map(_familyMemberFromRow).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _familyId = familyId;
+        _members
+          ..clear()
+          ..addAll(members);
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Hindi ma-load ang mga miyembro: $e';
+      });
+    }
+  }
 
   void _addMember() async {
+    if (_familyId == null) return;
     final result = await Navigator.of(context).push<FamilyMember?>(
       MaterialPageRoute(
-        builder: (context) => _AddEditFamilyMemberScreen(member: null),
+        builder: (context) =>
+            _AddEditFamilyMemberScreen(member: null, familyId: _familyId!),
       ),
     );
-    if (result != null) setState(() => _members.add(result));
+    if (result != null) {
+      await _loadMembers();
+    }
   }
 
   void _editMember(FamilyMember member) async {
-    final index = _members.indexWhere((m) => m.id == member.id);
-    if (index < 0) return;
+    if (_familyId == null) return;
     final result = await Navigator.of(context).push<FamilyMember?>(
       MaterialPageRoute(
         builder: (context) => _AddEditFamilyMemberScreen(
           member: member,
           onDeleted: () => _deleteMember(member),
+          familyId: _familyId!,
         ),
       ),
     );
-    if (result != null) setState(() => _members[index] = result);
+    if (result != null) {
+      await _loadMembers();
+    }
   }
 
-  void _deleteMember(FamilyMember member) {
+  Future<void> _deleteMember(FamilyMember member) async {
+    try {
+      await SupabaseService.client
+          .from('family_members')
+          .delete()
+          .eq('id', member.id);
+    } catch (_) {}
+    if (!mounted) return;
     setState(() => _members.removeWhere((m) => m.id == member.id));
   }
 
@@ -73,35 +223,40 @@ class _FamilyMembersScreenState extends State<FamilyMembersScreen> {
           IconButton(icon: const Icon(Icons.add), onPressed: _addMember),
         ],
       ),
-      body: _members.isEmpty
-          ? Center(
-              child: Padding(
-                padding: EdgeInsets.all(
-                  AppTheme.scale(context, AppTheme.spacingXl),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.people_outline,
-                      size: 64,
-                      color: AppTheme.textTertiary,
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _members.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(
+                      AppTheme.scale(context, AppTheme.spacingXl),
                     ),
-                    SizedBox(
-                      height: AppTheme.scale(context, AppTheme.spacingMd),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.people_outline,
+                          size: 64,
+                          color: AppTheme.textTertiary,
+                        ),
+                        SizedBox(
+                          height: AppTheme.scale(context, AppTheme.spacingMd),
+                        ),
+                        Text(
+                          _error ?? AppStrings.noFamilyMembers,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodyLarge
+                              ?.copyWith(
+                                color: AppTheme.textSecondary,
+                              ),
+                        ),
+                      ],
                     ),
-                    Text(
-                      AppStrings.noFamilyMembers,
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: AppTheme.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          : ListView.builder(
+                  ),
+                )
+              : ListView.builder(
               padding: EdgeInsets.fromLTRB(
                 AppTheme.scale(context, AppTheme.spacingLg),
                 AppTheme.scale(context, AppTheme.spacingMd),
@@ -191,6 +346,16 @@ class _FamilyMemberCard extends StatelessWidget {
                           style: Theme.of(context).textTheme.bodySmall
                               ?.copyWith(color: AppTheme.textSecondary),
                         ),
+                        if (member.relation != null &&
+                            member.relation!.trim().isNotEmpty)
+                          SizedBox(height: 2 * scale),
+                        if (member.relation != null &&
+                            member.relation!.trim().isNotEmpty)
+                          Text(
+                            'Relasyon: ${_FamilyMembersScreenState._relationOptions[member.relation] ?? member.relation}',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: AppTheme.textSecondary),
+                          ),
                       ],
                     ),
                   ),
@@ -238,10 +403,12 @@ class _FamilyMemberCard extends StatelessWidget {
 
 /// Add or edit family member form: name (optional), DOB, sex, pregnancy status, comorbidities.
 class _AddEditFamilyMemberScreen extends StatefulWidget {
-  const _AddEditFamilyMemberScreen({this.member, this.onDeleted});
+  const _AddEditFamilyMemberScreen(
+      {this.member, this.onDeleted, required this.familyId});
 
   final FamilyMember? member;
   final VoidCallback? onDeleted;
+  final String familyId;
 
   @override
   State<_AddEditFamilyMemberScreen> createState() =>
@@ -255,8 +422,10 @@ class _AddEditFamilyMemberScreenState
     const Duration(days: 365 * 25),
   );
   Sex _sex = Sex.female;
+  String? _relation;
   bool? _pregnancyStatus;
   final Set<String> _comorbidities = {};
+  bool _saving = false;
 
   @override
   void initState() {
@@ -266,6 +435,7 @@ class _AddEditFamilyMemberScreenState
       _nameController.text = m.name ?? '';
       _dateOfBirth = m.dateOfBirth;
       _sex = m.sex;
+      _relation = m.relation;
       _pregnancyStatus = m.pregnancyStatus;
       _comorbidities.addAll(m.comorbidities);
     }
@@ -277,23 +447,87 @@ class _AddEditFamilyMemberScreenState
     super.dispose();
   }
 
-  void _save() {
-    final list = _comorbidities.contains('Wala')
-        ? <String>[]
-        : _comorbidities.where((c) => c != 'Wala').toList();
-    final member = FamilyMember(
-      id: widget.member?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      name: _nameController.text.trim().isEmpty
-          ? null
-          : _nameController.text.trim(),
-      dateOfBirth: _dateOfBirth,
-      sex: _sex,
-      pregnancyStatus: _sex == Sex.female ? _pregnancyStatus : null,
-      comorbidities: list,
+  FamilyMember _familyMemberFromRow(Map<String, dynamic> r) {
+    final id = (r['id'] as String?) ?? '';
+    final dobRaw = r['date_of_birth']?.toString().split('T').first;
+    final dob = dobRaw != null ? DateTime.parse(dobRaw) : DateTime.now();
+    final sexDb = (r['sex'] as String?) ?? 'other';
+    final sex = Sex.values.firstWhere(
+      (s) => s.name == sexDb,
+      orElse: () => Sex.other,
     );
-    Navigator.of(context).pop(member);
+    final preg = r['pregnancy_status'] as bool?;
+    final relation = (r['relation'] as String?)?.trim();
+    final comorbid =
+        (r['comorbidities'] as List?)?.map((e) => e.toString()).toList() ??
+            <String>[];
+    return FamilyMember(
+      id: id,
+      name: (r['name'] as String?)?.trim(),
+      dateOfBirth: dob,
+      sex: sex,
+      relation: relation,
+      pregnancyStatus: preg,
+      comorbidities: comorbid,
+    );
   }
 
+  Future<void> _save() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      final list = _comorbidities.contains('Wala')
+          ? <String>[]
+          : _comorbidities.where((c) => c != 'Wala').toList();
+      final payload = {
+        'family_id': widget.familyId,
+        'name': _nameController.text.trim().isEmpty
+            ? null
+            : _nameController.text.trim(),
+        'date_of_birth': _dateOfBirth.toIso8601String(),
+        'sex': _sex.name,
+        'relation': _relation,
+        'pregnancy_status': _sex == Sex.female ? _pregnancyStatus : null,
+        'comorbidities': list,
+      };
+      final client = SupabaseService.client;
+      Map<String, dynamic> row;
+      if (widget.member == null) {
+        final res = await client
+            .from('family_members')
+            .insert(payload)
+            .select()
+            .single();
+        row = Map<String, dynamic>.from(res as Map);
+      } else {
+        final res = await client
+            .from('family_members')
+            .update(payload)
+            .eq('id', widget.member!.id)
+            .select()
+            .maybeSingle();
+        row = Map<String, dynamic>.from(
+            (res as Map?) ?? <String, dynamic>{'id': widget.member!.id});
+        row['date_of_birth'] ??=
+            widget.member!.dateOfBirth.toIso8601String();
+        row['sex'] ??= widget.member!.sex.name;
+        row['name'] ??= widget.member!.name;
+        row['relation'] ??= widget.member!.relation;
+        row['pregnancy_status'] ??= widget.member!.pregnancyStatus;
+        row['comorbidities'] ??= widget.member!.comorbidities;
+      }
+      final member = _familyMemberFromRow(row);
+      if (!mounted) return;
+      Navigator.of(context).pop(member);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Hindi na-save ang miyembro: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
   void _confirmDelete() {
     showDialog<bool>(
       context: context,
@@ -398,6 +632,33 @@ class _AddEditFamilyMemberScreenState
                 _sex = v ?? _sex;
                 if (_sex != Sex.female) _pregnancyStatus = null;
               }),
+            ),
+            SizedBox(height: scale * AppTheme.spacingMd),
+            DropdownButtonFormField<String?>(
+              value: _relation,
+              decoration: InputDecoration(
+                labelText: AppStrings.memberRelation,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                filled: true,
+                fillColor: AppTheme.searchBarBackground,
+              ),
+              items: [
+                DropdownMenuItem<String?>(
+                  value: null,
+                  child: Text(AppStrings.memberRelationSelect),
+                ),
+                ..._FamilyMembersScreenState._relationOptions.entries
+                    .map(
+                  (e) => DropdownMenuItem<String?>(
+                    value: e.key,
+                    child: Text(e.value),
+                  ),
+                )
+                    .toList(),
+              ],
+              onChanged: (v) => setState(() => _relation = v),
             ),
             if (_sex == Sex.female) ...[
               SizedBox(height: scale * AppTheme.spacingMd),

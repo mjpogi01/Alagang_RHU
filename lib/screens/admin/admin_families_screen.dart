@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../theme/app_theme.dart';
+import 'admin_ui.dart';
 
 /// Admin: view families and their members.
 class AdminFamiliesScreen extends StatelessWidget {
@@ -8,26 +9,22 @@ class AdminFamiliesScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppTheme.surfaceWhite,
-      appBar: AppBar(
-        title: const Text('Mga Pamilya at Miyembro'),
-        backgroundColor: AppTheme.primaryBlue,
-        foregroundColor: Colors.white,
-        elevation: 0,
-      ),
+      backgroundColor: AdminUI.bg,
+      appBar: const AdminAppBar(title: 'Mga Pamilya at Miyembro'),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(AppTheme.spacingXl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.family_restroom, size: 64, color: AppTheme.textTertiary),
+              const Icon(Icons.family_restroom,
+                  size: 64, color: AdminUI.textTertiary),
               const SizedBox(height: AppTheme.spacingMd),
               Text(
                 'Listahan ng mga pamilya at miyembro',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: AppTheme.textSecondary,
+                      color: AdminUI.textSecondary,
                     ),
               ),
               const SizedBox(height: AppTheme.spacingSm),
@@ -35,7 +32,7 @@ class AdminFamiliesScreen extends StatelessWidget {
                 'Ikokonekta sa Supabase (families, family_members)',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppTheme.textTertiary,
+                      color: AdminUI.textTertiary,
                     ),
               ),
             ],

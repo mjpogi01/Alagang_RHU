@@ -1,14 +1,46 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../l10n/app_strings.dart';
 import '../services/supabase_service.dart';
 import '../widgets/app_header.dart';
-import 'admin/admin_dashboard_screen.dart';
+import 'admin/admin_host_screen.dart';
 import 'family_members_screen.dart';
 
 /// More tab screen.
 class MoreScreen extends StatelessWidget {
   const MoreScreen({super.key});
+
+  Future<bool> _isCurrentUserAdmin() async {
+    final user = SupabaseService.client.auth.currentUser;
+    if (user == null) {
+      if (kDebugMode) debugPrint('[Admin] No current user (auth.currentUser is null).');
+      return false;
+    }
+    if (kDebugMode) debugPrint('[Admin] Checking for user_id=${user.id} email=${user.email}');
+    try {
+      final row = await SupabaseService.client
+          .from('profiles')
+          .select('is_admin')
+          .eq('user_id', user.id)
+          .maybeSingle();
+      if (row == null) {
+        if (kDebugMode) debugPrint('[Admin] No profile row found for user_id=${user.id}. Check that profiles has a row with this user_id.');
+        return false;
+      }
+      final v = row['is_admin'];
+      final isAdmin = v == true || v == 'true' || v == 1;
+      if (kDebugMode) debugPrint('[Admin] profiles.is_admin raw=$v (type=${v?.runtimeType}) => isAdmin=$isAdmin');
+      return isAdmin;
+    } on PostgrestException catch (e) {
+      if (kDebugMode) debugPrint('[Admin] PostgrestException: code=${e.code} message=${e.message} details=${e.details}');
+      return false;
+    } catch (e, st) {
+      if (kDebugMode) debugPrint('[Admin] Error: $e\n$st');
+      return false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -62,11 +94,25 @@ class MoreScreen extends StatelessWidget {
                       title: 'Admin',
                       subtitle: 'Pamahalaan ang mga pamilya, user, slideshow, bulletin, at iba pa',
                       icon: Icons.admin_panel_settings_outlined,
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (context) => const AdminDashboardScreen(),
-                        ),
-                      ),
+                      onTap: () async {
+                        final ok = await _isCurrentUserAdmin();
+                        if (!context.mounted) return;
+                        if (!ok) {
+                          if (kDebugMode) debugPrint('[Admin] Access denied. See logs above for reason.');
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Wala kang access sa Admin.'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                          return;
+                        }
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (context) => const AdminHostScreen(),
+                          ),
+                        );
+                      },
                     ),
                     _MoreTile(
                       title: AppStrings.signOut,

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config/supabase_config.dart';
+import 'services/notification_service.dart';
 import 'theme/app_theme.dart';
 import 'utils/auth_deep_link.dart';
 import 'utils/in_memory_gotrue_storage.dart';
@@ -33,6 +34,7 @@ void main() async {
     await AuthDeepLink.handleInitialLink();
   }
   await initializeDateFormatting('en');
+  await NotificationService.init();
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,

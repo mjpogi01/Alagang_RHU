@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <!-- Phone: open dialer / make calls (e.g. call RHU, emergency) -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- Notifications (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="alagang_rhu"
